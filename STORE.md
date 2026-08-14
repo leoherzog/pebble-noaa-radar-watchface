@@ -60,7 +60,7 @@ api.weather.gov — all free, no API keys, no accounts.
   no imagery or weather outside the country.
 - Needs the Pebble phone app for location, networking, and settings.
 - Works on Pebble Time / Time Steel (basalt), Pebble Time 2 (emery), and
-  Pebble Time 2 Round (gabbro). Pebble Time Round (chalk) is not supported — its
+  Pebble Round 2 (gabbro). Pebble Time Round (chalk) is not supported — its
   180×180 screen clips the outer text lines and has too little memory to decode a
   map image during heavy weather.
 
@@ -113,9 +113,10 @@ it). Can be added later from the web dashboard.
 - **Type**: watchface
 - **Platforms**: emery, basalt, gabbro
 - **License**: MIT
-- **Source URL**: `https://github.com/leoherzog/noaa-us-weather-radar` — *not yet
-  pushed; there is no `remote.origin.url` set, so the CLI will default this field
-  to empty until the repo exists.*
+- **Source URL**: `https://github.com/leoherzog/pebble-noaa-radar-watchface` —
+  the repo exists and `remote.origin.url` is set to its SSH form
+  (`git@github.com:leoherzog/pebble-noaa-radar-watchface.git`), so check what the
+  CLI derives from that before accepting the prefilled value.
 - **Support email**: pebble-radar@herzog.tech
 
 ## How to publish

@@ -6,7 +6,7 @@ Your watch can tell you it's raining. Wouldn't it be better if it showed you the
 
 Your phone does the heavy lifting: it figures out where you are, fetches the map imagery and National Weather Service data, blends the radar into the basemap, squeezes the result down to something a tiny watch can decode, and streams it over Bluetooth. The watch just draws it.
 
-![NOAA US Weather Radar running on a Pebble](screenshots/grand-rapids.png)
+![Twelve scenes from NOAA US Weather Radar, captured on a Pebble Time 2: storms over Grand Rapids, Minneapolis, New Orleans, Oklahoma City, Dallas, Miami, Denver, Phoenix, Seattle, New York, Washington DC, and Honolulu](screenshots/gallery/contact-emery.png)
 
 ### Features
 
@@ -26,12 +26,12 @@ Radar, basemap, and weather data come from [NOAA](https://mapservices.weather.no
 
 ## Installation
 
-Grab the `.pbw` from the [Releases page](../../releases) and side-load it, or build it yourself with the [Pebble SDK](https://developer.rebble.io/developer.pebble.com/sdk/index.html):
+Build it with the [Pebble SDK](https://developer.rebble.io/developer.pebble.com/sdk/index.html). Prebuilt `.pbw` bundles, once any are published, will appear on the [Releases page](../../releases) for side-loading.
 
 ```bash
 # Clone the repository
-git clone https://github.com/leoherzog/noaa-us-weather-radar.git
-cd noaa-us-weather-radar
+git clone https://github.com/leoherzog/pebble-noaa-radar-watchface.git
+cd pebble-noaa-radar-watchface
 
 # Install the JS dependencies (bundled into the phone-side code)
 npm install
@@ -48,7 +48,7 @@ pebble install --emulator emery
 
 ## Requirements
 
-- A color Pebble: Pebble Time or Time Steel (`basalt`), Pebble Time 2 (`emery`), or Pebble Time 2 Round (`gabbro`)
+- A color Pebble: Pebble Time or Time Steel (`basalt`), Pebble Time 2 (`emery`), or Pebble Round 2 (`gabbro`)
 - A location in the United States (that's where NOAA's radar coverage ends!)
 - The Pebble phone app, for location, networking, and settings
 
