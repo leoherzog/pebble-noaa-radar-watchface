@@ -1,0 +1,65 @@
+{
+  "name": "noaa-us-weather-radar",
+  "author": "Leo Herzog",
+  "version": "1.0.0",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "dependencies": {
+    "@rebble/clay": "^1.0.10",
+    "pako": "^1.0.11",
+    "upng-js": "^2.1.0"
+  },
+  "pebble": {
+    "displayName": "NOAA US Weather Radar",
+    "uuid": "6808fb9d-6728-4be3-8e2a-e65cba4e94c6",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "emery",
+      "basalt",
+      "gabbro"
+    ],
+    "watchapp": {
+      "watchface": true
+    },
+    "capabilities": [
+      "location",
+      "configurable",
+      "health"
+    ],
+    "messageKeys": [
+      "IMG_TOTAL",
+      "IMG_OFFSET",
+      "IMG_DATA",
+      "REQUEST_IMAGES",
+      "RADAR_TIME",
+      "TopSlot",
+      "BottomSlot",
+      "Lat",
+      "Lon",
+      "TopFont",
+      "BottomFont",
+      "TopSlot1",
+      "TopFont1",
+      "BottomSlot2",
+      "BottomFont2",
+      "WX_COND",
+      "WX_FCST",
+      "WX_HILO",
+      "WX_ALERT",
+      "WX_ALERT2",
+      "WX_EXP",
+      "WX_EXP2",
+      "WX_TIME",
+      "TextColor",
+      "OutlineColor",
+      "RefreshInterval",
+      "BtIndicator"
+    ],
+    "resources": {
+      "media": []
+    }
+  }
+}
