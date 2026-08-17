@@ -17,8 +17,17 @@ var SLOT_OPTIONS = [
   { "label": "Radar Age",      "value": "13" },
   { "label": "Lat/Long",       "value": "14" },
   { "label": "Current Conditions",     "value": "15" },
+  { "label": "Temperature",            "value": "22" },
+  { "label": "Feels Like",             "value": "23" },
+  { "label": "Dew Point",              "value": "24" },
+  { "label": "Humidity",               "value": "25" },
+  { "label": "Wind",                   "value": "26" },
+  { "label": "Pressure",               "value": "27" },
   { "label": "Today's Forecast",       "value": "16" },
+  { "label": "Tonight/Tomorrow Forecast", "value": "28" },
   { "label": "High / Low",             "value": "17" },
+  { "label": "Sunrise / Sunset",       "value": "29" },
+  { "label": "Golden Hour",            "value": "30" },
   { "label": "Active Alerts",          "value": "18" },
   { "label": "Alerts + Upcoming",      "value": "19" },
   { "label": "Alerts, else High / Low","value": "20" },
@@ -211,14 +220,23 @@ module.exports = [
       // WxUnits is phone-side only -- stored in localStorage by webviewclosed,
       // never forwarded to the watch, exactly like Zoom. A units change
       // invalidates the cached weather payload and refetches.
+      //
+      // This one setting drives EVERY unit the face renders, which is why the
+      // label is "Units" and not "Temperature" any more: a user who asked for
+      // Celsius wants km/h and millibars with it. Only the label and the
+      // option text changed -- the messageKey and the 0/1 values are
+      // deliberately untouched, because Clay prefills the page from
+      // localStorage['clay-settings'] keyed by messageKey, so a rename would
+      // silently reset every saved config (the same hazard recorded against
+      // RadarMode above).
       {
         "type": "select",
         "messageKey": "WxUnits",
-        "label": "Temperature",
+        "label": "Units",
         "defaultValue": "0",
         "options": [
-          { "label": "Fahrenheit", "value": "0" },
-          { "label": "Celsius",    "value": "1" }
+          { "label": "Imperial (°F, mph, inHg)",   "value": "0" },
+          { "label": "Metric (°C, km/h, mb)",      "value": "1" }
         ]
       },
       // Phone-side only, exactly like WxUnits above: pkjs owns the NWS alert

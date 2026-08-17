@@ -15,7 +15,8 @@ Your phone does the heavy lifting: it figures out where you are, fetches the map
 - 🔍 **Three zoom levels** — City (100 km), State (250 km), or Region (500 km) across the screen
 - 📝 **Four configurable text lines** — Time, Date, Weekday, Steps, Distance, Calories, Sleep, Heart Rate, Battery, Bluetooth, Radar Age, Lat/Long, and more, each with its own font size (including "shrink to fit")
 - 🖍️ **Custom text and outline colors** — every line is drawn with a halo outline so it stays readable over busy map areas, and both colors are yours to pick
-- 🌦️ **Weather from the National Weather Service** — current conditions, today's forecast, high/low, and active alerts, in Fahrenheit or Celsius
+- 🌦️ **Weather from the National Weather Service** — current conditions, temperature, feels like, dew point, humidity, wind, pressure, today's forecast, tonight/tomorrow, high/low, and active alerts, in imperial or metric units
+- 🌅 **Sunrise/sunset and golden hour** — computed on your phone from your exact position rather than fetched, so they don't depend on a nearby weather station, and shown in your watch's own 12- or 24-hour format
 - ⚠️ **Alert-aware lines** — show your normal weather until a watch or warning takes over the line, and alerts clear themselves when they expire even if your phone is out of reach
 - 🗓️ **Severe alerts in your timeline** — tornado, severe thunderstorm, flash flood and other severe or extreme NWS alerts show up as timeline pins that run for as long as the alert does, then quietly age out on their own. Pins can take several minutes to arrive, so treat them as a record of what's in force, not as a siren
 - 🎨 **Translucent, opaque, or disabled radar** — or use it as a plain topo map face
@@ -69,7 +70,7 @@ Open the watchface's settings in the Pebble phone app.
 | Text Color | Color of the four text lines (default black) |
 | Text Outline Color | Color of the halo drawn under the glyphs (default white) |
 | Bluetooth Disconnection Indicator | Show or hide the top-left badge shown while the phone is out of range (default on) |
-| Temperature | Fahrenheit or Celsius |
+| Units | Imperial (°F, mph, inHg) or Metric (°C, km/h, mb) |
 | Send Severe Weather Alerts to Timeline | Push severe and extreme NWS alerts into your Pebble timeline as pins (default on) |
 
 The two outer lines default to None, so out of the box you get a clean two-line face: time up top, date down below, radar behind.

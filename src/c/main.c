@@ -93,7 +93,9 @@ enum { SLOT_TOP1, SLOT_TOP2, SLOT_BOT1, SLOT_BOT2 };
 // 6 ISO date, 7 Bluetooth, 8 Distance, 9 Active cal, 10 Total cal,
 // 11 Sleep, 12 Heart rate, 13 Radar age, 14 Lat/Long,
 // 15 Current conditions, 16 Today's forecast, 17 High/Low, 18 Active alerts,
-// 19 Alerts + upcoming, 20 Alerts else High/Low, 21 Alerts else Conditions.
+// 19 Alerts + upcoming, 20 Alerts else High/Low, 21 Alerts else Conditions,
+// 22 Temperature, 23 Feels like, 24 Dew point, 25 Humidity, 26 Wind,
+// 27 Pressure, 28 Tonight/Tomorrow, 29 Sunrise/Sunset, 30 Golden hour.
 //
 // The persisted blob is VERSIONED, not inferred. load_settings() accepts it
 // only when its length and its version byte both match this build, and falls
@@ -188,7 +190,7 @@ static uint32_t   s_saved_len;
 static uint32_t   s_saved_sum;
 static int32_t    s_saved_stamp;
 
-// ---- Weather (slots 15-21) -------------------------------------------------
+// ---- Weather (slots 15-31) -------------------------------------------------
 // Finished strings assembled, unit-converted and width-fitted by pkjs; the
 // watch only ever copies them and compares `now - stamp`. Nothing here is
 // persisted: pkjs replays its last payload on 'ready'.
@@ -196,8 +198,17 @@ static int32_t    s_saved_stamp;
 
 static char   s_wx_cond[32], s_wx_fcst[32], s_wx_hilo[32];
 static char   s_wx_alert[32], s_wx_alert2[32];
+static char   s_wx_temp[32], s_wx_feels[32], s_wx_dew[32], s_wx_hum[32];
+static char   s_wx_wind[32], s_wx_pres[32], s_wx_fcst2[32];
 static time_t s_wx_time;                  // WX_TIME, for staleness
 static time_t s_wx_exp, s_wx_exp2;        // per-slot alert expiry
+// Sun events, as absolute instants rather than finished strings -- the ONE
+// weather group the phone cannot format, because 12/24-hour is
+// clock_is_24h_style(), a watch setting that never leaves the watch. Four
+// int32s also cost less than four more 32-byte buffers. 0 = no such event
+// (polar day/night, where the phone's SunCalc has no answer to give).
+static time_t s_wx_sunrise, s_wx_sunset;
+static time_t s_wx_gold1, s_wx_gold2;     // golden hour span, start and end
 
 // Both arrays are in display order, so these are plain lookups. They were
 // switch statements until the blob became versioned: the two original slots
@@ -332,6 +343,139 @@ static void fmt_alert(char *buf, size_t size, const char *src,
   }
 }
 
+// Render an absolute instant as a wall-clock time in the watch's OWN 12/24
+// style. The sun slots arrive as numbers precisely so this can happen here:
+// clock_is_24h_style() is a watch setting the phone never sees, which is the
+// same constraint that makes the phone's alert lead times relative ("in 45m")
+// rather than absolute.
+//
+// The meridiem is a single letter -- "6:12a", not the Time slot's "6:12am" --
+// and that asymmetry is deliberate. Strings built HERE get none of the
+// phone's width machinery: no char budget, no abbreviation table, no ladder
+// of shorter forms. The character saved is spent on the golden-hour range,
+// which has to fit two times and a separator in one slot.
+static void fmt_clock(char *buf, size_t size, time_t t, bool meridiem) {
+  // localtime() honours the time_t passed to it (pbl_override_localtime ->
+  // sys_localtime_r in reference/PebbleOS/src/fw/applib/pbl_std/pbl_std.c),
+  // so an arbitrary instant formats correctly -- but it fills a SHARED
+  // app-state tm, so the fields must be consumed before the next call rather
+  // than held across one. fmt_gold below is the caller that has to care.
+  struct tm *lt = localtime(&t);
+  if (clock_is_24h_style()) {
+    snprintf(buf, size, "%02d:%02d", lt->tm_hour, lt->tm_min);
+  } else {
+    int h12 = lt->tm_hour % 12;
+    if (h12 == 0) h12 = 12;
+    snprintf(buf, size, "%d:%02d%s", h12, lt->tm_min,
+             meridiem ? (lt->tm_hour < 12 ? "a" : "p") : "");
+  }
+}
+
+// A sun time is displayable while it is still ahead, plus one refresh
+// interval of grace.
+//
+// fmt_wx's staleness rule does not fit these: an instant does not go stale,
+// it merely passes. pkjs always sends the NEXT occurrence, so a value only
+// falls into the past between heartbeats and the following one replaces it --
+// without the grace the Sunrise slot would blank AT sunrise, which is exactly
+// when someone is looking at it. Past the grace the phone is unreachable and
+// the value really is wrong, so it blanks.
+static bool sun_showable(time_t t, time_t now) {
+  return t != 0 && now - t <= (time_t)s_settings.refresh_min * 60;
+}
+
+static bool is_leap(int year) {
+  return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
+
+// True when the event is past TOMORROW in local calendar terms, and so cannot
+// be labelled by a clock time alone.
+//
+// A sun event is normally today or tomorrow and a bare "6:12a" reads
+// naturally. Inside the Arctic it can be DAYS out — Utqiagvik's next sunrise
+// during polar night is up to five — and a clock time for an instant two days
+// away reads as this morning. By then the slot is answering a different
+// question ("when does the sun come back"), for which the date is the useful
+// half and the minute is noise.
+//
+// The test is the CALENDAR, not a lead-time threshold, and that is a
+// correction rather than a preference: a fixed cutoff was tried and the
+// measured lead times turned out to be a smooth continuum with no gap to put
+// one in — 3 to 4 samples in every hour bucket from 24 h to 167 h across a
+// year at every NWS site. Any threshold therefore mislabels real cases on one
+// side or the other. Fort Yukon at 14:00 on 6 July has its next sunset at
+// 01:31 local on 8 July: 35.5 h, which a 36 h cutoff renders as "1:31a" for
+// an event two days out. "today or tomorrow" has no such failure by
+// construction, since that is exactly when a bare clock time is unambiguous.
+//
+// Compared on local yday/year rather than by dividing seconds, because a
+// local day is not 86,400 s long across a DST change. Events are at most a
+// week out, so only the same-year and next-year cases can arise.
+static bool sun_far(time_t t, time_t now) {
+  struct tm *lt = localtime(&now);
+  int nyday = lt->tm_yday, nyear = lt->tm_year;
+  int diff;
+  lt = localtime(&t);          // shared tm: read `now`'s fields out first
+  if (lt->tm_year == nyear) {
+    diff = lt->tm_yday - nyday;
+  } else if (lt->tm_year == nyear + 1) {
+    diff = lt->tm_yday + (is_leap(1900 + nyear) ? 366 : 365) - nyday;
+  } else if (lt->tm_year == nyear - 1) {
+    // BEHIND us, across New Year. Reachable: fmt_gold passes the START of a
+    // window that is in progress, so at 00:30 on 1 January a window that
+    // opened at 22:45 on 31 December lands here. It is not "far" — it is now —
+    // and without this arm it would fall to the catch-all below and render
+    // "Dec 31" instead of the range, on that one night a year.
+    return false;
+  } else {
+    return true;               // more than a year out, which cannot be soon
+  }
+  return diff > 1;
+}
+
+// "Jan 23" rather than a clock time. Its own helper because fmt_gold needs
+// the same answer for a window whose start is that far out.
+static void fmt_sun_date(char *buf, size_t size, time_t t) {
+  strftime(buf, size, "%b %d", localtime(&t));
+}
+
+// A pair of instants as a range, "7:48-8:31p". Used by BOTH sun slots --
+// Sunrise/Sunset is the daylight span, Golden Hour the golden one -- because
+// the two are the same shape and the phone sends each as a coherent pair
+// rather than as two independently-resolved "next" values.
+//
+// Keyed on the END being showable, so a span already in progress keeps
+// rendering rather than blanking halfway through: that is what lets the
+// Sunrise/Sunset slot go on showing this morning's sunrise all afternoon, and
+// it matches how the phone chooses which span to send.
+static void fmt_span(char *buf, size_t size, time_t a, time_t b, time_t now) {
+  if (!a || !sun_showable(b, now)) {
+    snprintf(buf, size, "--");
+    return;
+  }
+  // A window days out gets its date instead of a range: two clock times and a
+  // separator say nothing about WHICH day, and there is no room for both.
+  if (sun_far(a, now)) {
+    fmt_sun_date(buf, size, a);
+    return;
+  }
+  // Both meridiems are read BEFORE either string is built: localtime returns
+  // a pointer to one shared tm, so the second call would otherwise overwrite
+  // the first one's answer.
+  struct tm *lt = localtime(&a);
+  bool pm_a = lt->tm_hour >= 12;
+  lt = localtime(&b);
+  bool pm_b = lt->tm_hour >= 12;
+  char s1[12], s2[12];
+  // One meridiem, on the end, whenever both ends share it -- the normal case,
+  // since every golden window is bounded by sunrise or sunset. At high
+  // latitudes a window CAN straddle noon (an Arctic winter sunrise after
+  // 11:00), and then each end carries its own.
+  fmt_clock(s1, sizeof(s1), a, pm_a != pm_b);
+  fmt_clock(s2, sizeof(s2), b, true);
+  snprintf(buf, size, "%s-%s", s1, s2);
+}
+
 // Format one slot's string into buf. Pure formatting: no TextLayer access,
 // so update_slots() can compare the result against the previous contents and
 // re-measure only when the string actually changed.
@@ -456,6 +600,15 @@ static void format_slot(uint8_t kind, char *buf, size_t size) {
         fmt_wx(buf, size, kind == 20 ? s_wx_hilo : s_wx_cond, now);
       }
       break;
+    case 22: fmt_wx(buf, size, s_wx_temp,  now); break;
+    case 23: fmt_wx(buf, size, s_wx_feels, now); break;
+    case 24: fmt_wx(buf, size, s_wx_dew,   now); break;
+    case 25: fmt_wx(buf, size, s_wx_hum,   now); break;
+    case 26: fmt_wx(buf, size, s_wx_wind,  now); break;
+    case 27: fmt_wx(buf, size, s_wx_pres,  now); break;
+    case 28: fmt_wx(buf, size, s_wx_fcst2, now); break;
+    case 29: fmt_span(buf, size, s_wx_sunrise, s_wx_sunset, now); break;
+    case 30: fmt_span(buf, size, s_wx_gold1,   s_wx_gold2,  now); break;
     default:  // None
       buf[0] = '\0';
       break;
@@ -969,10 +1122,32 @@ static void inbox_received_callback(DictionaryIterator *iter, void *ctx) {
     wx_copy(iter, MESSAGE_KEY_WX_HILO,   s_wx_hilo,   sizeof(s_wx_hilo));
     wx_copy(iter, MESSAGE_KEY_WX_ALERT,  s_wx_alert,  sizeof(s_wx_alert));
     wx_copy(iter, MESSAGE_KEY_WX_ALERT2, s_wx_alert2, sizeof(s_wx_alert2));
+    wx_copy(iter, MESSAGE_KEY_WX_TEMP,   s_wx_temp,   sizeof(s_wx_temp));
+    wx_copy(iter, MESSAGE_KEY_WX_FEELS,  s_wx_feels,  sizeof(s_wx_feels));
+    wx_copy(iter, MESSAGE_KEY_WX_DEW,    s_wx_dew,    sizeof(s_wx_dew));
+    wx_copy(iter, MESSAGE_KEY_WX_HUM,    s_wx_hum,    sizeof(s_wx_hum));
+    wx_copy(iter, MESSAGE_KEY_WX_WIND,   s_wx_wind,   sizeof(s_wx_wind));
+    wx_copy(iter, MESSAGE_KEY_WX_PRES,   s_wx_pres,   sizeof(s_wx_pres));
+    wx_copy(iter, MESSAGE_KEY_WX_FCST2,  s_wx_fcst2,  sizeof(s_wx_fcst2));
     Tuple *exp_t  = dict_find(iter, MESSAGE_KEY_WX_EXP);
     Tuple *exp2_t = dict_find(iter, MESSAGE_KEY_WX_EXP2);
     if (exp_t)  s_wx_exp  = (time_t)exp_t->value->uint32;
     if (exp2_t) s_wx_exp2 = (time_t)exp2_t->value->uint32;
+    // Sun events. int32, like RADAR_TIME and for the same reason: pkjs
+    // marshals a plain JS number as a 4-byte int, and the union's smaller
+    // members are only valid for a smaller tuple. Unconditional within this
+    // block -- 0 is a MEANINGFUL value here (no such event at this latitude
+    // today), so these must be assigned, not skipped, when the key is absent
+    // or zero. The whole block only runs when WX_TIME is present, which is
+    // the same gate the strings above sit behind.
+    Tuple *sr_t = dict_find(iter, MESSAGE_KEY_WX_SUNRISE);
+    Tuple *ss_t = dict_find(iter, MESSAGE_KEY_WX_SUNSET);
+    Tuple *g1_t = dict_find(iter, MESSAGE_KEY_WX_GOLD1);
+    Tuple *g2_t = dict_find(iter, MESSAGE_KEY_WX_GOLD2);
+    s_wx_sunrise = sr_t ? (time_t)sr_t->value->int32 : 0;
+    s_wx_sunset  = ss_t ? (time_t)ss_t->value->int32 : 0;
+    s_wx_gold1   = g1_t ? (time_t)g1_t->value->int32 : 0;
+    s_wx_gold2   = g2_t ? (time_t)g2_t->value->int32 : 0;
     s_wx_time = (time_t)wx_time_t->value->uint32;
     update_slots();
   }

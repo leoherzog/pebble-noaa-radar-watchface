@@ -1,7 +1,7 @@
 {
   "name": "noaa-us-weather-radar",
   "author": "Leo Herzog",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "keywords": [
     "pebble-app"
   ],
@@ -9,6 +9,7 @@
   "dependencies": {
     "@rebble/clay": "^1.0.10",
     "pako": "^1.0.11",
+    "suncalc": "^1.9.0",
     "upng-js": "^2.1.0"
   },
   "pebble": {
@@ -50,6 +51,17 @@
       "WX_HILO",
       "WX_ALERT",
       "WX_ALERT2",
+      "WX_TEMP",
+      "WX_FEELS",
+      "WX_DEW",
+      "WX_HUM",
+      "WX_WIND",
+      "WX_PRES",
+      "WX_FCST2",
+      "WX_SUNRISE",
+      "WX_SUNSET",
+      "WX_GOLD1",
+      "WX_GOLD2",
       "WX_EXP",
       "WX_EXP2",
       "WX_TIME",

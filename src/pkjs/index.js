@@ -41,6 +41,13 @@ var composite = require('./composite');
 // optional -- webpack builds the bundle from THIS file's require graph, and
 // an un-required src/pkjs/*.js compiles to nothing at all.
 var timeline = require('./timeline');
+// Sunrise/sunset/golden-hour math for the sun slots. PINNED TO THE 1.x LINE
+// (^1.9.0 can never resolve to 2.x), and that is load-bearing rather than
+// conservatism: 1.9.0 is plain ES5 in a UMD wrapper, while 2.x's CommonJS
+// build is ES6 -- const, destructuring, Symbol.toStringTag -- which the
+// legacy pkjs runtime this face still supports cannot parse. Everything else
+// in this file is deliberately ES5 for the same reason.
+var SunCalc = require('suncalc');
 // Load our Clay configuration file
 var clayConfig = require('./config');
 // Config-page logic (show/hide the manual-location input, block an invalid
@@ -122,7 +129,7 @@ function radarMode() {
 // setting exists, so its heap cost is exactly zero. Defaults ON, and the
 // default MUST come from numSetting's explicit branch — the key is null on a
 // fresh install and Number(null) is 0, which a plain clamp would silently
-// accept as "off". (Do not copy wxCelsius()'s `=== '1'` idiom: that is a
+// accept as "off". (Do not copy wxMetric()'s `=== '1'` idiom: that is a
 // default-OFF read and would invert this.)
 function timelineAlerts() {
   return numSetting('TimelineAlerts', 1, 0, 1) === 1;
@@ -573,7 +580,8 @@ function exportUrl(base, bbox, transparent) {
 }
 
 // ---------------------------------------------------------------------------
-// Weather (slots 15-21) — NWS JSON API, api.weather.gov. No key, no provider.
+// Weather (slots 15-31) — NWS JSON API, api.weather.gov. No key, no provider.
+// 15-28 are fetched; 29-31 (sun times) are computed here from the location.
 // Every string is assembled, unit-converted, abbreviated and width-fitted
 // here; the watch receives finished strings and two expiry timestamps.
 // ---------------------------------------------------------------------------
@@ -590,12 +598,29 @@ var WX_SLOT_STRINGS = {
   15: ['cond'],   16: ['fcst'],           17: ['hilo'],
   18: ['alert'],  19: ['alert2'],
   20: ['alert', 'hilo'],                  // alert, else high/low
-  21: ['alert', 'cond']                   // alert, else current conditions
+  21: ['alert', 'cond'],                  // alert, else current conditions
+  22: ['temp'],   23: ['feels'],          24: ['dew'],
+  25: ['hum'],    26: ['wind'],           27: ['pres'],
+  28: ['fcst2'],                          // the SECOND forecast period
+  // The sun group is the one set of values this file does NOT format: they
+  // travel as epoch seconds and the watch renders them. 12/24-hour is
+  // clock_is_24h_style(), a WATCH setting that never leaves the watch -- the
+  // same constraint that makes fmtLead() relative rather than absolute -- so
+  // the phone cannot turn an instant into a wall-clock string. They are
+  // registered here anyway, because this table is the single place a weather
+  // slot exists and slotsFrom('sun') is what gates the computation.
+  29: ['daylight'], 30: ['gold']
 };
 
-// Which fetched resource feeds each string.
+// Which fetched resource feeds each string. 'sun' is computed here from the
+// location rather than fetched, so it has no entry in fetchWeather's interval
+// gates -- but it still needs a source name, so that a sun slot on its own
+// registers as a weather slot and gets a payload.
 var WX_STRING_SOURCE = {
-  cond: 'obs', fcst: 'fcst', hilo: 'fcst', alert: 'alerts', alert2: 'alerts'
+  cond: 'obs', fcst: 'fcst', hilo: 'fcst', alert: 'alerts', alert2: 'alerts',
+  temp: 'obs', feels: 'obs', dew: 'obs', hum: 'obs', wind: 'obs', pres: 'obs',
+  fcst2: 'fcst',
+  daylight: 'sun', gold: 'sun'
 };
 
 // for-in rather than Object.keys: nothing else in this file relies on ES5
@@ -765,14 +790,57 @@ function capBytes(s) {
 
 // Temperatures render as integers with a degree sign, no unit letter. The
 // observation arrives in degC; forecast periods arrive in degF.
-function wxCelsius() { return localStorage.getItem('WxUnits') === '1'; }
+//
+// ONE setting drives every unit on the face, which is why the Clay label is
+// "Units" rather than "Temperature": a user who asked for Celsius wants km/h
+// and millibars with it. Phone-side only, like Zoom -- no unit ever reaches
+// the watch. The messageKey stays 'WxUnits' and the values stay 0/1, so no
+// saved config resets (renaming a Clay key does; see config.js).
+function wxMetric() { return localStorage.getItem('WxUnits') === '1'; }
 
 function fmtTempFromC(c) {
-  return String(Math.round(wxCelsius() ? c : c * 9 / 5 + 32)) + '°';
+  return String(Math.round(wxMetric() ? c : c * 9 / 5 + 32)) + '°';
 }
 
 function fmtTempFromF(f) {
-  return String(Math.round(wxCelsius() ? (f - 32) * 5 / 9 : f)) + '°';
+  return String(Math.round(wxMetric() ? (f - 32) * 5 / 9 : f)) + '°';
+}
+
+// A finite number, or null. NWS reports a missing measurement as an explicit
+// null inside the value object, and a station routinely drops one field while
+// reporting the rest -- across 119 stations sampled at 40 US points,
+// temperature was present at 91%, dewpoint 88%, humidity 87%, wind speed 89%,
+// pressure 83%, and wind gust only 12%.
+function obsVal(o) {
+  return (o && isNum(o.value)) ? o.value : null;
+}
+
+function isNum(v) { return typeof v === 'number' && isFinite(v); }
+
+// Pick the longest form that fits the budget.
+//
+// fitWx's third stage is a tail truncation, which is right for PROSE -- a
+// clipped forecast is still readable -- and wrong for a NUMBER, where a
+// clipped string is a different, plausible-looking value: 'Feels 78°' cut to
+// basalt's 7-character Extra Large budget reads 'Feels 7'. So every numeric
+// slot supplies its own ladder of progressively shorter forms, longest
+// first, and the last rung is short enough for the tightest budget in either
+// CHAR_BUDGET table (7). If even that overruns, it is returned anyway and the
+// watch's own ellipsis takes it -- the same safety net prose relies on.
+function pickWx(forms, budget) {
+  for (var i = 0; i < forms.length; i++) {
+    if (forms[i].length <= budget) return forms[i];
+  }
+  return forms[forms.length - 1];
+}
+
+// 16-point compass from degrees. Rounding to 22.5° steps then wrapping at 16
+// is what makes 348.75-360 read 'N' rather than falling off the end.
+var WIND_DIRS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE',
+                 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+
+function compass(deg) {
+  return WIND_DIRS[Math.round((((deg % 360) + 360) % 360) / 22.5) % 16];
 }
 
 // localStorage JSON helpers for the per-resource caches.
@@ -918,20 +986,77 @@ function getGrid(lkey, cb) {
   });
 }
 
+// Everything /observations/latest exposes that a slot can display, in the
+// API's OWN units (degC, km/h, Pa, percent, degrees). Unit conversion happens
+// in assembleWx, so the entries stay unit-agnostic and a units change
+// re-renders straight from cache -- which is what lets webviewclosed backdate
+// `t` rather than evict (see the unitsChanged block).
+//
+// Every field is stored whether or not a slot displays it: they all arrive in
+// the one response, so caching the lot costs nothing, and newly configuring a
+// slot then populates it on the next assembleWx instead of waiting out the
+// 9-minute refetch gate.
+function obsRecord(p) {
+  return {
+    temp: obsVal(p.temperature),
+    desc: p.textDescription || '',
+    dp:   obsVal(p.dewpoint),
+    rh:   obsVal(p.relativeHumidity),
+    ws:   obsVal(p.windSpeed),
+    wd:   obsVal(p.windDirection),
+    wg:   obsVal(p.windGust),
+    hi:   obsVal(p.heatIndex),
+    wc:   obsVal(p.windChill),
+    pr:   obsVal(p.barometricPressure)
+  };
+}
+
+// True when a record carries any numeric at all, description aside. wd and wg
+// are deliberately absent: neither is ever rendered on its own (WX_WIND needs
+// isNum(obs.ws) first), so a station reporting only a wind direction has
+// nothing any slot could display.
+function obsHasValue(r) {
+  return isNum(r.temp) || isNum(r.dp) || isNum(r.rh) || isNum(r.ws) ||
+         isNum(r.hi) || isNum(r.wc) || isNum(r.pr);
+}
+
+// Rank a fall-through candidate: a description AND numbers beats a
+// description alone, which beats numbers alone, which beats nothing.
+//
+// Ranked rather than first-wins, because the two halves feed different slots.
+// A nearer station reporting a full numeric set with an EMPTY textDescription
+// is ordinary (KABQ does it right now), and first-wins would let it suppress
+// a farther station's 'Thunderstorm' -- leaving Current Conditions on '--'
+// where the pre-1.1.0 code, which only ever kept a description-bearing
+// record, would have shown the text. Ties keep the earlier, nearer station.
+function obsScore(r) {
+  return (r.desc ? 2 : 0) + (obsHasValue(r) ? 1 : 0);
+}
+
 // Observation: nearest usable station's latest. Values are frequently null on
 // a given station, so fall through to the 2nd then 3rd; an observation older
-// than 2 h is unusable too. A station with a description but no temperature
-// is kept as a partial in case no better station follows.
+// than 2 h is unusable too.
+//
+// Temperature is still what makes a station outright USABLE -- it is the most
+// widely reported field (91%) and the one every other reading tends to travel
+// with -- but a station that drops it can still carry dew point, wind or
+// humidity, so the partial now keeps the whole record rather than just the
+// description, and picks the best of them by obsScore rather than the first.
 function fetchObs(stations, cb) {
   var partial = null;
   var any200 = false;
   function next(i) {
     if (i >= stations.length) {
       if (partial) {
-        writeWx('wx_obs', { t: Date.now(), temp: partial.temp, desc: partial.desc });
+        partial.t = Date.now();
+        writeWx('wx_obs', partial);
       } else if (any200) {
-        // The stations answered but nothing was usable: render '--'.
-        writeWx('wx_obs', { t: Date.now(), temp: null, desc: '' });
+        // The stations answered but nothing was usable: render '--'. An
+        // all-null record, not a hand-built pair, so every field a slot may
+        // read is present and explicitly empty.
+        var empty = obsRecord({});
+        empty.t = Date.now();
+        writeWx('wx_obs', empty);
       }
       // else: every request failed — keep the previous data, retry next beat.
       cb();
@@ -943,15 +1068,14 @@ function fetchObs(stations, cb) {
         var p = obj.properties;
         var ts = Date.parse(p.timestamp || '');
         if (!isNaN(ts) && Date.now() - ts <= 2 * 3600 * 1000) {
-          var temp = (p.temperature && typeof p.temperature.value === 'number')
-                       ? p.temperature.value : null;
-          var desc = p.textDescription || '';
-          if (temp !== null) {
-            writeWx('wx_obs', { t: Date.now(), temp: temp, desc: desc });
+          var rec = obsRecord(p);
+          if (rec.temp !== null) {
+            rec.t = Date.now();
+            writeWx('wx_obs', rec);
             cb();
             return;
           }
-          if (desc && !partial) partial = { temp: null, desc: desc };
+          if (obsScore(rec) > (partial ? obsScore(partial) : 0)) partial = rec;
         }
       } else {
         logWxFail('observation', status, obj);
@@ -962,14 +1086,18 @@ function fetchObs(stations, cb) {
   next(0);
 }
 
-// Forecast: only the first two periods matter (slot 16 = periods[0], slot 17
-// derives H/L from the pair), so only they are kept.
+// Forecast: only the first two periods matter (slot 16 = periods[0], slot 28
+// = periods[1], slot 17 derives H/L from the pair), so only they are kept.
+// `n` is the period's own NWS name -- 'Tonight', 'Wednesday Night', 'Thursday'
+// -- which slot 28 prefixes when the width allows, because 'Mstly Cldy' alone
+// does not say WHICH half of the day it describes.
 function fetchFcst(url, cb) {
   fetchJson(url, function (status, obj) {
     if (status === 200 && obj && obj.properties &&
         obj.properties.periods && obj.properties.periods.length) {
       var p = obj.properties.periods.slice(0, 2).map(function (pd) {
-        return { d: !!pd.isDaytime, t: pd.temperature, s: pd.shortForecast || '' };
+        return { d: !!pd.isDaytime, t: pd.temperature, s: pd.shortForecast || '',
+                 n: pd.name || '' };
       });
       writeWx('wx_fcst', { t: Date.now(), p: p });
     } else {
@@ -1097,9 +1225,155 @@ function buildAlertStrings(feats, nowSec) {
   return { a: a, aExp: aExp, a2: a2, a2Exp: a2Exp };
 }
 
-// One AppMessage carrying every populated weather key (~260 B against an
-// 8,200 B inbox). Slots 20/21 add nothing: they are composed on the watch
-// from WX_ALERT + WX_HILO / WX_COND.
+// ---------------------------------------------------------------------------
+// Sun times (slots 29-31) — computed here, formatted on the watch.
+//
+// These four numbers are the only weather values that cross as INTEGERS. The
+// watch renders them because 12/24-hour is clock_is_24h_style(), which never
+// leaves the watch; four int32s are also cheaper than four 32-byte buffers.
+// Nothing is fetched — SunCalc is pure math over the location — so a sun slot
+// on its own produces a payload with no network at all.
+// ---------------------------------------------------------------------------
+
+// Epoch seconds, or 0 when the event does not occur.
+//
+// Above the Arctic Circle SunCalc returns an INVALID DATE during polar day
+// and polar night — verified at Utqiagvik on the December solstice, where
+// sunrise, sunset and both golden hours are all invalid. Alaska is inside NWS
+// coverage, so this is a live case, not a theoretical one, and getTime() on
+// it is NaN: sent unguarded it would marshal into the int32 tuple as garbage
+// rather than as "no event".
+function sunSec(d) {
+  if (!d) return 0;
+  var ms = d.getTime();
+  return isFinite(ms) ? Math.floor(ms / 1000) : 0;
+}
+
+// SunCalc's "day" is anchored on LOCAL SOLAR noon, not on UTC, so getTimes()
+// at 19:30 local still returns that evening's sunset rather than tomorrow's
+// (measured, since the opposite would have put the Sunset slot a day ahead
+// for the last hours of every evening). Events it returns can therefore be in
+// the past, and the scan walks forward until one is not. Day -1 is included
+// for nextGolden(), where at high latitudes a window can still be in progress
+// across a solar-day boundary. It cannot contribute to nextDaylight(), whose
+// windows close within their own solar day -- a couple of spare getTimes()
+// calls a heartbeat, not worth a second array to avoid.
+//
+// It reaches SIX days forward, not two, because near a polar transition
+// consecutive solar days skip the event entirely and the true next occurrence
+// is further out than intuition suggests: measured worst cases are 4.97 d for
+// sunrise and 4.94 d for sunset at Utqiagvik, and the smallest gap that a
+// 2-day scan already missed was 2.008 d at Fort Yukon. A short scan does not
+// fail loudly -- it returns 0 and the slot reads '--', during exactly the
+// weeks an Alaskan resident most wants the answer. These are pure arithmetic
+// with no network, so the extra reach is close to free.
+var SUN_DAYS = [-1, 0, 1, 2, 3, 4, 5, 6];
+
+// The daylight window to show, as [sunrise, sunset] epoch seconds.
+//
+// A PAIR, not two independently-resolved "next" values, and that is the whole
+// reason this function exists. Sunrise and sunset share one slot, so they have
+// to describe the same day: resolving each to its own next occurrence means
+// that the moment today's sunrise passes, the slot pairs TOMORROW's sunrise
+// with TODAY's sunset and renders a backwards span.
+//
+// Selected on the first window whose END is still ahead, exactly like
+// nextGolden -- so a day already in progress keeps showing its own sunrise
+// (now in the past) beside its sunset, and only after sunset does the slot
+// roll to tomorrow.
+//
+// No cross-day pairing and no adjacency test is needed here, unlike
+// nextGolden: SunCalc derives sunrise and sunset from a single solve, so a
+// solar day has both or neither and every window closes within its own day.
+// Both absent is polar day or polar night, which the watch renders as '--'.
+function nextDaylight(lat, lon, nowSec) {
+  for (var i = 0; i < SUN_DAYS.length; i++) {
+    var t = SunCalc.getTimes(new Date((nowSec + SUN_DAYS[i] * 86400) * 1000),
+                             lat, lon);
+    var a = sunSec(t.sunrise), b = sunSec(t.sunset);
+    if (a && b && b > a && b > nowSec) return [a, b];
+  }
+  return [0, 0];
+}
+
+// The golden hour window to show, as [start, end] epoch seconds.
+//
+// Built from BOUNDARIES rather than from same-call pairs. The sun is golden
+// between -0.833 deg (sunrise/sunset) and +6 deg, so a window OPENS at
+// sunrise or at goldenHour (the evening descent through 6 deg) and CLOSES at
+// goldenHourEnd (the morning climb through 6 deg) or at sunset. Collect every
+// valid boundary across the scan, sort by time, and the windows are simply
+// the adjacent open->close pairs.
+//
+// Pairing within one getTimes() call — the obvious form, and the one this
+// replaced — is wrong at high latitudes in two measured ways, both of which
+// blanked the slot to '--' for weeks at a time inside NWS coverage:
+//
+//   1. When the sun rises but never reaches 6 deg, BOTH golden fields are
+//      Invalid while sunrise/sunset stay valid, so both pairs were rejected
+//      and nothing rendered — although the whole short day is golden. Fires
+//      24 days a year at Anchorage, 65 at Fairbanks.
+//   2. During polar day the reverse holds: sunrise/sunset are Invalid and the
+//      golden fields are valid, but within one call goldenHour and
+//      goldenHourEnd sit ~21 h apart and belong to DIFFERENT windows. The
+//      real window pairs goldenHour(day d) with goldenHourEnd(day d+1), so no
+//      same-call pairing could ever have found it. Utqiagvik, 81 days.
+//
+// The sort handles all four shapes with one rule and needs no special cases.
+// Duplicate boundaries (adjacent scan days resolving to one solar day) are
+// harmless: a repeated open is skipped by the open->close test, and the
+// strict `>` rejects a zero-length pair.
+function nextGolden(lat, lon, nowSec) {
+  var ev = [];
+  for (var i = 0; i < SUN_DAYS.length; i++) {
+    var t = SunCalc.getTimes(new Date((nowSec + SUN_DAYS[i] * 86400) * 1000),
+                             lat, lon);
+    var marks = [[sunSec(t.sunrise), 1], [sunSec(t.goldenHourEnd), 0],
+                 [sunSec(t.goldenHour), 1], [sunSec(t.sunset), 0]];
+    for (var j = 0; j < marks.length; j++) {
+      // Third element is the scan day the boundary came from; see the
+      // adjacency test below. 0 = the event does not occur.
+      if (marks[j][0]) ev.push([marks[j][0], marks[j][1], i]);
+    }
+  }
+  ev.sort(function (a, b) { return a[0] - b[0]; });
+  // Ascending, so the first qualifying pair is the earliest window that has
+  // not ended — which keeps a window already in progress on screen instead of
+  // jumping to the next one.
+  //
+  // The two boundaries must come from the SAME or an ADJACENT scan day, and
+  // that test is load-bearing rather than tidiness. Without it an unmatched
+  // open reaches across days that contribute NO boundaries at all: in a
+  // narrow band around |lat| 72.58 the midnight-sun minimum altitude drifts
+  // across +6 deg mid-scan, so several consecutive days have the sun above
+  // the golden band the whole way round and yield neither mark. The dangling
+  // goldenHour then paired with a goldenHourEnd five or six days later,
+  // producing a measured 120-144 h "golden hour" whose sun reached 40.9 deg.
+  //
+  // Adjacency is exactly the right bound because every legitimate shape needs
+  // at most one day of reach: a normal window and the all-day case close
+  // within their own day, and the polar-day window pairs goldenHour(d) with
+  // goldenHourEnd(d+1). No two scan entries ever resolve to the same solar
+  // day (a +86400 s step increments SunCalc's julianCycle by exactly 1), so
+  // the index difference IS the solar-day difference.
+  //
+  // Only the polar-DAY edge can strand an open like this. The polar-night
+  // edge cannot: SunCalc derives sunrise and sunset from one solve, so a day
+  // has both or neither, and every such day self-closes.
+  for (var k = 0; k + 1 < ev.length; k++) {
+    if (ev[k][1] === 1 && ev[k + 1][1] === 0 &&
+        ev[k + 1][0] > ev[k][0] && ev[k + 1][0] > nowSec &&
+        ev[k + 1][2] - ev[k][2] <= 1) {
+      return [ev[k][0], ev[k + 1][0]];
+    }
+  }
+  return [0, 0];
+}
+
+// One AppMessage carrying every populated weather key — 19 keys, worst case
+// ~600 B against an 8,200 B inbox (it was ~260 B at 8 keys, before the
+// Aug 2026 slot expansion). Slots 20/21 add nothing: they are composed on the
+// watch from WX_ALERT + WX_HILO / WX_COND.
 //
 // WX_TIME is the FETCH time, not the assembly time. This payload is re-sent
 // every heartbeat and replayed on 'ready' even when every fetch failed and
@@ -1110,12 +1384,17 @@ function buildAlertStrings(feats, nowSec) {
 // stamp is the OLDEST fetch time among those two that a configured line
 // actually displays — an unconfigured resource going stale in the cache
 // must not blank the lines that are fresh.
-function assembleWx() {
+function assembleWx(lat, lon) {
   var nowSec = Math.floor(Date.now() / 1000);
   var tOldest = 0;   // ms; 0 = no timed resource contributed
   var pl = {
     'WX_COND': '', 'WX_FCST': '', 'WX_HILO': '',
     'WX_ALERT': '', 'WX_ALERT2': '',
+    'WX_TEMP': '', 'WX_FEELS': '', 'WX_DEW': '', 'WX_HUM': '',
+    'WX_WIND': '', 'WX_PRES': '', 'WX_FCST2': '',
+    // Epoch seconds; 0 = no such event (polar day/night), which the watch
+    // renders as '--'. Not strings — see the sun-times section above.
+    'WX_SUNRISE': 0, 'WX_SUNSET': 0, 'WX_GOLD1': 0, 'WX_GOLD2': 0,
     'WX_EXP': 0, 'WX_EXP2': 0, 'WX_TIME': nowSec
   };
 
@@ -1125,7 +1404,10 @@ function assembleWx() {
   // without this a resource left cached by a previous config would ride every
   // payload indefinitely. Re-enabling a slot repopulates the string on the
   // next webviewclosed -> fetchWeather -> sendWx pass, without a refetch.
-  var obs = wxUses(slotsShowing('cond')) ? readWx('wx_obs') : null;
+  // slotsFrom('obs'), not slotsShowing('cond'): one observation now feeds
+  // seven strings, and gating on the conditions slot alone would leave the
+  // other six empty whenever it was the one not configured.
+  var obs = wxUses(slotsFrom('obs')) ? readWx('wx_obs') : null;
   if (obs) {
     // "{temp}° {description}"; either half may be missing. Both missing: send
     // nothing and let the watch render '--', the same contract WX_HILO uses
@@ -1135,14 +1417,103 @@ function assembleWx() {
               ? '' : fmtTempFromC(obs.temp);
     var desc = obs.desc ? fitWx(obs.desc, t ? b - t.length - 1 : b) : '';
     pl['WX_COND'] = capBytes(t && desc ? t + ' ' + desc : (t || desc));
+
+    // The six single-value strings below are built from that ONE cache read,
+    // so they all carry the same observation instant. They are built whether
+    // or not their slot is configured -- an unconfigured budget resolves to
+    // the 31-char ceiling and the extra keys cost ~130 B against an 8,200 B
+    // inbox, which is cheaper than seven more gates to keep in sync.
+    // The one numeric string with no ladder: it is at most 5 characters
+    // ('-100°') against a tightest budget of 7, so no rung below it exists.
+    if (isNum(obs.temp)) {
+      pl['WX_TEMP'] = capBytes(fmtTempFromC(obs.temp));
+    }
+    // Feels Like takes heat index or wind chill ONLY when it moves in that
+    // correction's own direction, then falls back to the plain temperature.
+    //
+    // Testing presence alone is the trap, and it is not a rare one: NWS
+    // computes heatIndex UNCONDITIONALLY, including far outside the humidity
+    // regime where it means anything, and in dry air it comes out BELOW the
+    // air temperature. Measured against live stations (Aug 2026), 9 of 16
+    // reporting a heat index had it below temperature -- Phoenix at 35.0 C
+    // reporting 34.0 C, Las Vegas 32.0 C reporting 31.0 C. A presence test
+    // renders 'Feels 93°' beside a Temperature slot reading 95° on a Phoenix
+    // afternoon. When neither correction applies, what it feels like IS the
+    // air temperature, which is what the fall-through says.
+    var feels = null;
+    if (isNum(obs.temp)) {
+      feels = obs.temp;
+      if (isNum(obs.hi) && obs.hi > obs.temp) {
+        feels = obs.hi;
+      } else if (isNum(obs.wc) && obs.wc < obs.temp) {
+        feels = obs.wc;
+      }
+    } else if (isNum(obs.hi)) {
+      feels = obs.hi;          // nothing to compare against; take it as given
+    } else if (isNum(obs.wc)) {
+      feels = obs.wc;
+    }
+    if (feels !== null) {
+      var ft = fmtTempFromC(feels);
+      pl['WX_FEELS'] = capBytes(pickWx(['Feels ' + ft, 'Fls ' + ft, ft],
+                                        budgetFor(slotsShowing('feels'))));
+    }
+    if (isNum(obs.dp)) {
+      var dt = fmtTempFromC(obs.dp);
+      pl['WX_DEW'] = capBytes(pickWx(['Dew ' + dt, 'D ' + dt, dt],
+                                      budgetFor(slotsShowing('dew'))));
+    }
+    if (isNum(obs.rh)) {
+      var rh = String(Math.round(obs.rh)) + '%';
+      pl['WX_HUM'] = capBytes(pickWx(['Hum ' + rh, rh],
+                                      budgetFor(slotsShowing('hum'))));
+    }
+    if (isNum(obs.ws)) {
+      // km/h from the API either way. The gust is appended only when it
+      // genuinely exceeds the sustained wind: NWS carries windGust straight
+      // from the METAR G group, which is only coded when the peak runs 10 kt
+      // (~18.5 km/h) above the mean -- so its mere presence already implies
+      // significance, and the explicit margin here is belt and braces for a
+      // non-METAR source.
+      var metric = wxMetric();
+      var spd = Math.round(metric ? obs.ws : obs.ws / 1.609344);
+      var unit = metric ? ' km/h' : ' mph';
+      var dir = isNum(obs.wd) ? compass(obs.wd) + ' ' : '';
+      var gust = '';
+      if (isNum(obs.wg) && obs.wg >= obs.ws + 8) {
+        gust = ' G' + Math.round(metric ? obs.wg : obs.wg / 1.609344);
+      }
+      // Calm is its own word, not '0 mph' -- but only when nothing gusted.
+      pl['WX_WIND'] = capBytes((spd === 0 && !gust) ? 'Calm'
+        : pickWx([dir + spd + unit + gust, dir + spd + unit, dir + spd],
+                 budgetFor(slotsShowing('wind'))));
+    }
+    if (isNum(obs.pr)) {
+      // Pascals from the API. inHg keeps two decimals (the useful digits are
+      // the last two); millibars are whole numbers.
+      var pres = wxMetric() ? String(Math.round(obs.pr / 100)) + ' mb'
+                            : (obs.pr / 3386.389).toFixed(2) + ' in';
+      pl['WX_PRES'] = capBytes(pickWx([pres, pres.split(' ')[0]],
+                                       budgetFor(slotsShowing('pres'))));
+    }
     if (!tOldest || obs.t < tOldest) tOldest = obs.t;
   }
 
-  // slotsFrom('fcst') is {16,17,20}, covering BOTH strings this block emits
-  // (WX_FCST and WX_HILO), so one gate is enough for the pair.
+  // slotsFrom('fcst') is {16,17,20,28}, covering ALL THREE strings this block
+  // emits (WX_FCST, WX_HILO and WX_FCST2), so one gate is enough for the set.
   var fc = wxUses(slotsFrom('fcst')) ? readWx('wx_fcst') : null;
   if (fc && fc.p && fc.p.length) {
     pl['WX_FCST'] = capBytes(fitWx(fc.p[0].s, budgetFor(slotsShowing('fcst')), true));
+    // The second period, prefixed with its own NWS name when that fits:
+    // 'Tonight: Mstly Cldy' says which half of the day it covers, where
+    // 'Mstly Cldy' alone does not. Prose, so the inner fitWx truncation is
+    // the right fallback and doubles as pickWx's last rung.
+    if (fc.p.length >= 2) {
+      var b2 = budgetFor(slotsShowing('fcst2'));
+      var s2 = fitWx(fc.p[1].s, b2, true);
+      var nm = fc.p[1].n;
+      pl['WX_FCST2'] = capBytes(nm ? pickWx([nm + ': ' + s2, s2], b2) : s2);
+    }
     // NWS can return a period with a null temperature; the observation path
     // guards this explicitly and slot 17 needs the same — suppress the
     // string (the watch renders '--') rather than send 'H NaN° L 73°'.
@@ -1186,6 +1557,21 @@ function assembleWx() {
     pl['WX_ALERT2'] = capBytes(r.a2);
     pl['WX_EXP2']   = r.a2Exp;
   }
+  // Sun times deliberately do NOT fold into tOldest. WX_TIME drives fmt_wx's
+  // 3-hour staleness blanking, which is about DATA going out of date; an
+  // instant does not go stale, it merely passes, and the watch tests these
+  // against its own clock instead. Computed last so a thrown SunCalc call
+  // could not cost the payload its strings — and gated, because a location
+  // this far from any configured sun slot has no business burning eight
+  // getTimes() calls every heartbeat.
+  if (wxUses(slotsFrom('sun')) && isNum(lat) && isNum(lon)) {
+    var day = nextDaylight(lat, lon, nowSec);
+    pl['WX_SUNRISE'] = day[0];
+    pl['WX_SUNSET']  = day[1];
+    var gold = nextGolden(lat, lon, nowSec);
+    pl['WX_GOLD1'] = gold[0];
+    pl['WX_GOLD2'] = gold[1];
+  }
   if (tOldest) pl['WX_TIME'] = Math.floor(tOldest / 1000);
   return pl;
 }
@@ -1209,7 +1595,6 @@ function fetchWeather(lat, lon) {
   var wantPins = timelineAlerts();
   if (!wantWx && !wantPins) return;
   var lkey = lat.toFixed(2) + ',' + lon.toFixed(2);
-  if (localStorage.getItem('wx_nocov') === lkey) return;
 
   // The per-resource caches are for a PLACE as well as a time (wx_grid keys
   // itself; these three do not): after a flight, yesterday's city's forecast
@@ -1217,9 +1602,27 @@ function fetchWeather(lat, lon) {
   // for up to another hour. A new rounded location drops all three — alerts
   // included, since rendering an alert from 2,500 km away if this beat's
   // fetch fails is worse than rendering none.
+  //
+  // This runs BEFORE the no-coverage check, and must. markNoCoverage() drops
+  // the caches when it latches, but a later visit to a covered place refills
+  // them while the latch survives — so an uncovered location reached from a
+  // covered one would otherwise assemble the PREVIOUS place's weather and
+  // re-send it every heartbeat. The latch is keyed on 2-decimal lat/lon
+  // (~1.1 km), so that is a short hop across a coverage edge, not a flight.
   if (localStorage.getItem('wx_lkey') !== lkey) {
     dropWxCaches();
     try { localStorage.setItem('wx_lkey', lkey); } catch (e) {}
+  }
+
+  if (localStorage.getItem('wx_nocov') === lkey) {
+    // Sun times are astronomy, not NWS: they are exactly as correct outside
+    // the coverage area as inside it, so a configured sun slot still gets its
+    // payload here. Every weather string assembles empty — the caches above
+    // belong to this place, and there is no coverage to fill them — which is
+    // the honest answer. Without a sun slot this is the bare `return` it has
+    // always been.
+    if (wxUses(slotsFrom('sun'))) sendWx(assembleWx(lat, lon));
+    return;
   }
 
   // The fallback slots need two resources each: 20 = alerts + forecast,
@@ -1240,7 +1643,17 @@ function fetchWeather(lat, lon) {
   // beat (observation every 20 min, forecast every 70). The slack absorbs
   // the latency without letting an off-cycle call (webviewclosed) refetch
   // early against the server's own max-age.
-  var needObs  = wantObs  && (!obs  || now - obs.t  >=  9 * 60 * 1000);
+  // `obs.dp === undefined` refetches a pre-1.1.0 observation blob once,
+  // regardless of its age. That shape ({t, temp, desc}) is what the PUBLISHED
+  // 1.0.0 build wrote, so every upgrading user has one, and without this the
+  // symptom reads as a partial failure rather than as a loading state:
+  // configure Dew Point, Humidity, Wind and Pressure right after upgrading and
+  // Conditions and Temperature render while those four sit on '--' for up to
+  // nine minutes, because the interval gate below is closed and nothing else
+  // forces a refetch. obsRecord() always writes the key (null when the station
+  // drops the field), so this can only ever fire once per install.
+  var needObs  = wantObs  && (!obs  || obs.dp === undefined ||
+                              now - obs.t  >=  9 * 60 * 1000);
   var needFcst = wantFcst && (!fcst || now - fcst.t >= 59 * 60 * 1000);
   // Alerts go every heartbeat (server max-age=5): no interval check.
 
@@ -1253,7 +1666,7 @@ function fetchWeather(lat, lon) {
     // WX_TIME's mere presence and blanks all five buffers, so the damage is
     // invisible in a screenshot. Two independent barriers keep it impossible:
     // this test, and assembleWx's own alert gate, which stays untouched.
-    if (--pending === 0 && wantWx) sendWx(assembleWx());
+    if (--pending === 0 && wantWx) sendWx(assembleWx(lat, lon));
   }
 
   if (wantAlert) {

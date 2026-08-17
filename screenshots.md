@@ -200,6 +200,13 @@ About 40 s per tile, ~25 minutes for all 36. Revert both patches afterwards and
 - `screenshots/tools/emu-probe.sh` — re-tests the firmware-dependent emu-*
   commands after an SDK upgrade, with the health stub reverted and
   non-colliding injection values.
+- `screenshots/tools/banner.py` and `banner_bg.py` — the 720×320 appstore
+  marketing banners in `screenshots/banner/`, one per platform. No emulator
+  involved: the watch screen is a `screenshots/store/` PNG at native pixels and
+  the backdrop is a plain topo+radar fetch at banner size. Rationale and the
+  build command are in `STORE.md` under Marketing banner. If a gallery
+  re-capture changes `screenshots/store/`, re-run `banner.py` — it reads those
+  files directly.
 
 **Two scenarios are diff gates rather than gallery tiles.** 13
 (`autofont-deterministic`) puts three of four slots on auto fonts with every

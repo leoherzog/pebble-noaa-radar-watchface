@@ -310,11 +310,11 @@
     "cfg": {
       "TopSlot1": 4,
       "TopSlot": 0,
-      "BottomSlot": 1,
-      "BottomSlot2": 4,
+      "BottomSlot": 29,
+      "BottomSlot2": 25,
       "TopFont1": 0,
       "TopFont": 4,
-      "BottomFont": 2,
+      "BottomFont": 7,
       "BottomFont2": 0,
       "RefreshInterval": 10,
       "BtIndicator": 1,
@@ -327,7 +327,7 @@
       "basalt": "6040 B / 18c / 32%",
       "gabbro": "13634 B / 19c / 47%"
     },
-    "clock": "2026-08-02 09:07:00"
+    "clock": "2026-08-17 09:07:00"
   },
   {
     "id": 11,
@@ -343,8 +343,8 @@
     "cfg": {
       "TopSlot1": 17,
       "TopSlot": 0,
-      "BottomSlot": 1,
-      "BottomSlot2": 3,
+      "BottomSlot": 26,
+      "BottomSlot2": 27,
       "TopFont1": 0,
       "TopFont": 3,
       "BottomFont": 0,
