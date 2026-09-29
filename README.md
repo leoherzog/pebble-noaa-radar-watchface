@@ -66,7 +66,7 @@ Open the watchface's settings in the Pebble phone app.
 | Refresh Interval | How often the radar, weather, and alerts refresh: 5, 10, 15, 20, 30, or 60 minutes (default 10) |
 | Use GPS | Follow the phone's location, or turn off to enter a fixed latitude/longitude |
 | Top/Bottom Lines 1 & 2 | What each of the four text lines shows |
-| Line Sizes | Extra Small through Extra Large, fixed or shrink-to-fit |
+| Line Sizes | Extra Small through Super Large, fixed or shrink-to-fit |
 | Text Color | Color of the four text lines (default black) |
 | Text Outline Color | Color of the halo drawn under the glyphs (default white) |
 | Bluetooth Disconnection Indicator | Show or hide the top-left badge shown while the phone is out of range (default on) |

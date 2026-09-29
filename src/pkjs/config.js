@@ -38,17 +38,22 @@ var SLOT_OPTIONS = [
 // 0-4 are fixed sizes; 6-9 are auto with that size as the ceiling ("at most
 // this size": the band is reserved at the ceiling, the glyphs shrink to fit).
 // Value 5 (auto with an Extra Small ceiling) is identical to fixed Extra
-// Small, so it is handled in code but omitted from the UI.
+// Small, so it is handled in code but omitted from the UI. Super Large is
+// appended as 10 (fixed) and 11 (auto) rather than renumbering: Clay prefills
+// from saved values, so a renumbered code would silently change every saved
+// size.
 var SIZE_OPTIONS = [
   { "label": "Extra Small", "value": "0" },
   { "label": "Small",       "value": "1" },
   { "label": "Medium",      "value": "2" },
   { "label": "Large",       "value": "3" },
   { "label": "Extra Large", "value": "4" },
+  { "label": "Super Large", "value": "10" },
   { "label": "Small, shrink to fit",       "value": "6" },
   { "label": "Medium, shrink to fit",      "value": "7" },
   { "label": "Large, shrink to fit",       "value": "8" },
-  { "label": "Extra Large, shrink to fit", "value": "9" }
+  { "label": "Extra Large, shrink to fit", "value": "9" },
+  { "label": "Super Large, shrink to fit", "value": "11" }
 ];
 
 // One line of the face: what it shows, and how big. The inner two lines keep

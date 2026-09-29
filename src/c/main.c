@@ -123,7 +123,7 @@ enum { SLOT_TOP1, SLOT_TOP2, SLOT_BOT1, SLOT_BOT2 };
 typedef struct {
   uint8_t version;              // SETTINGS_VERSION at write time
   uint8_t slots[NUM_SLOTS];     // display order: Top 1, Top 2, Bottom 1, Bottom 2
-  uint8_t fonts[NUM_SLOTS];     // 0-4 = fixed XS..XL; 5-9 = auto, ceiling = value-5
+  uint8_t fonts[NUM_SLOTS];     // encoding: see slot_font_raw()
   // GColor8 .argb bytes. The text color is applied to all four TextLayers;
   // the outline color is the halo pass painted under them (map_update_proc).
   uint8_t text_argb;
@@ -220,41 +220,53 @@ static uint8_t slot_kind(int i) {
 }
 
 // Font byte encoding: 0-4 = fixed XS..XL; 5-9 = auto ("shrink to fit"),
-// ceiling = value - 5.
+// ceiling = value - 5; 10 = fixed Super Large; 11 = auto, ceiling Super
+// Large. Super Large is appended rather than slotted in at 5 because the
+// phone's saved Clay values keep their meaning only if no code is renumbered.
 static uint8_t slot_font_raw(int i) {
   return s_settings.fonts[i];
 }
 
-// Auto: raw 5..9 ONLY. An out-of-range byte (a future encoding block saved
-// by a newer build, or plain corruption) reads as FIXED Extra Large via
+#define FONT_SUPER 5   // ladder index of Super Large
+#define NUM_FONTS  6
+
+// Auto: raw 5..9 and 11 ONLY. An out-of-range byte (a future encoding block
+// saved by a newer build, or plain corruption) reads as FIXED Extra Large via
 // slot_font()'s clamp below — the same answer the pre-auto binary gave it —
 // rather than silently becoming "auto, ceiling XL".
 static bool slot_font_auto(int i) {
   uint8_t f = slot_font_raw(i);
-  return f >= 5 && f <= 9;
+  return (f >= 5 && f <= 9) || f == 11;
 }
 
-// Ceiling: raw >= 5 ? raw - 5 : raw, clamped to 4. The size dropdown means
-// "at most this size": the band is reserved at the ceiling and only the
-// glyphs shrink inside it, so the face never moves in response to content.
+// Ceiling as a ladder index. The size dropdown means "at most this size": the
+// band is reserved at the ceiling and only the glyphs shrink inside it, so
+// the face never moves in response to content.
 static uint8_t slot_font(int i) {
   uint8_t f = slot_font_raw(i);
+  if (f == 10 || f == 11) {
+    return FONT_SUPER;
+  }
   if (f >= 5) {
     f -= 5;
   }
   return f > 4 ? 4 : f;
 }
 
-// Font ladder for the size dropdowns: XS..XL. FONT_H is the layer frame
-// height; FONT_OFF is subtracted from the slot's height line, lifting the
-// frame by about half its height so it straddles that line instead of
-// hanging below it (index 3 sits 1 px lower than exact center).
-static const char *FONT_KEYS[5] = {
+// Font ladder for the size dropdowns: XS..XL, Super Large. FONT_H is the
+// layer frame height; FONT_OFF is subtracted from the slot's height line,
+// lifting the frame by about half its height so it straddles that line
+// instead of hanging below it (index 3 sits 1 px lower than exact center).
+// Super Large is Bitham 42 Bold: the largest system font declared with full
+// Basic Latin on every platform, so "pm" and weather text render. Roboto 49
+// is digits-only and LECO 60 is absent on basalt. System fonts cost no app
+// heap: their FontInfo lives in a kernel table.
+static const char *FONT_KEYS[NUM_FONTS] = {
   FONT_KEY_GOTHIC_14_BOLD, FONT_KEY_GOTHIC_18_BOLD, FONT_KEY_GOTHIC_24_BOLD,
-  FONT_KEY_GOTHIC_28_BOLD, FONT_KEY_BITHAM_30_BLACK,
+  FONT_KEY_GOTHIC_28_BOLD, FONT_KEY_BITHAM_30_BLACK, FONT_KEY_BITHAM_42_BOLD,
 };
-static const int8_t FONT_H[5]   = { 18, 22, 28, 34, 36 };
-static const int8_t FONT_OFF[5] = {  9, 11, 14, 16, 18 };
+static const int8_t FONT_H[NUM_FONTS]   = { 18, 22, 28, 34, 36, 50 };
+static const int8_t FONT_OFF[NUM_FONTS] = {  9, 11, 14, 16, 18, 25 };
 
 // The few pixels TextLayer effectively insets from its frame. Not derivable
 // from a header; corrected from screenshots.
@@ -478,8 +490,9 @@ static void fmt_span(char *buf, size_t size, time_t a, time_t b, time_t now) {
 
 // Format one slot's string into buf. Pure formatting: no TextLayer access,
 // so update_slots() can compare the result against the previous contents and
-// re-measure only when the string actually changed.
-static void format_slot(uint8_t kind, char *buf, size_t size) {
+// re-measure only when the string actually changed. `super` is true when the
+// line's ceiling is Super Large.
+static void format_slot(uint8_t kind, bool super, char *buf, size_t size) {
   time_t now = time(NULL);
   // Never NULL: the firmware's localtime (pbl_override_localtime in
   // reference/PebbleOS/src/fw/applib/pbl_std/pbl_std.c) returns the app-state
@@ -491,7 +504,11 @@ static void format_slot(uint8_t kind, char *buf, size_t size) {
 
   switch (kind) {
     case 0:  // Time
-      if (clock_is_24h_style()) {
+      // Super Large takes the sun slots' one-letter meridiem: "10:00pm" is
+      // 177 px in Bitham 42 Bold against basalt's 140, "10:00p" is 139.
+      if (super) {
+        fmt_clock(buf, size, now, true);
+      } else if (clock_is_24h_style()) {
         strftime(buf, size, "%H:%M", tick_time);
       } else {
         // 12h: no leading zero, lowercase meridiem attached ("5:04pm").
@@ -625,7 +642,7 @@ static void update_slots(void) {
     // strftime returns 0 and leaves the buffer's contents unspecified when the
     // formatted result does not fit, so start every slot from an empty string.
     tmp[0] = '\0';
-    format_slot(slot_kind(i), tmp, sizeof(tmp));
+    format_slot(slot_kind(i), slot_font(i) == FONT_SUPER, tmp, sizeof(tmp));
     // Re-resolve only when the string actually changed -- Time changes once a
     // minute, Steps a few times an hour, alerts rarely, Battery hardly at all.
     // Fixed lines resolve straight to their configured size, so they can

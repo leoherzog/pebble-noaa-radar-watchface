@@ -679,17 +679,18 @@ function wxNeeded() {
   return wxUses(WX_SLOTS);
 }
 
-// Chars that fit, indexed [fontIdx = XS..XL]. Estimates, deliberately a
-// little wide — fitWx() truncates and the watch-side ellipsis is the safety
-// net (see fitWx, below).
-var CHAR_BUDGET_144 = [18, 16, 12, 10, 7];
-var CHAR_BUDGET_200 = [25, 22, 16, 14, 10];
+// Chars that fit, indexed [fontIdx = XS..XL, Super Large]. Estimates,
+// deliberately a little wide — fitWx() truncates and the watch-side ellipsis
+// is the safety net (see fitWx, below). Super Large scales Extra Large's
+// budget by the two fonts' mean glyph advance (16.8 vs 21.5 px).
+var CHAR_BUDGET_144 = [18, 16, 12, 10, 7, 5];
+var CHAR_BUDGET_200 = [25, 22, 16, 14, 10, 7];
 
 // The budget is per STRING, not per slot code: the two fallback slots (20/21)
 // feed off strings they do not name, so each string takes the minimum budget
 // among the union of lines that could display it.
 //
-// Auto font sizes (font values 5-9; see CLAUDE.md "Text slot layout"): when ANY line
+// Auto font sizes (font values 5-9 and 11; see CLAUDE.md "Text slot layout"): when ANY line
 // displaying the string is auto, target the Extra Small row instead --
 // minimal abbreviation, maximum information, and the watch picks the largest
 // size that fits it. Abbreviating to the ceiling's budget would mean the
@@ -702,9 +703,11 @@ function budgetFor(codes) {
   var anyAuto = false;
   wxLines().forEach(function (l) {
     if (codes.indexOf(l[0]) >= 0) {
+      // Font codes as main.c's slot_font_raw() documents them.
       var f = l[1];
-      if (f >= 5) { anyAuto = true; return; }
-      if (!(f >= 0 && f <= 4)) f = 2;
+      if ((f >= 5 && f <= 9) || f === 11) { anyAuto = true; return; }
+      if (f === 10) f = 5;
+      else if (!(f >= 0 && f <= 4)) f = 2;
       if (table[f] < best) best = table[f];
     }
   });
@@ -824,9 +827,11 @@ function isNum(v) { return typeof v === 'number' && isFinite(v); }
 // clipped string is a different, plausible-looking value: 'Feels 78°' cut to
 // basalt's 7-character Extra Large budget reads 'Feels 7'. So every numeric
 // slot supplies its own ladder of progressively shorter forms, longest
-// first, and the last rung is short enough for the tightest budget in either
-// CHAR_BUDGET table (7). If even that overruns, it is returned anyway and the
-// watch's own ellipsis takes it -- the same safety net prose relies on.
+// first, and the last rung is short enough for every budget up to Extra Large
+// in either CHAR_BUDGET table (7). Super Large on the 144 px table (5) is the
+// exception: Wind's last rung ('WSW 12') runs to 6. If even that overruns, it
+// is returned anyway and the watch's own ellipsis takes it -- the same safety
+// net prose relies on.
 function pickWx(forms, budget) {
   for (var i = 0; i < forms.length; i++) {
     if (forms[i].length <= budget) return forms[i];
