@@ -3,9 +3,8 @@
 #
 # Exists so the invoking command line is just `bash sweep.sh ...`: capture.sh
 # runs `pkill -f 'qemu-pebbl[e]'`, and the bracket trick only protects against
-# the pattern matching its OWN literal -- if the driving command line mentions
-# qemu anywhere, pkill still kills the session. A loop typed inline at the
-# prompt is exactly that hazard.
+# the pattern matching its own literal: if the driving command line mentions
+# qemu anywhere, pkill still kills the session.
 #
 # Usage: sweep.sh "<platforms>" "<scenario ids>"
 #   GALLERY_DIR=/somewhere  bash sweep.sh "emery basalt" "1 2 13"

@@ -6,12 +6,12 @@ pypkjs persists localStorage as a Python dbm.dumb database at
 with plain UTF-8 string values. Writing 'cfg2' there is equivalent to saving
 the Clay settings page: index.js's 'ready' handler replays that blob verbatim
 to the watch. Zoom / ManualLoc / RadarMode / WxUnits are phone-side only and
-live in their own keys -- RadarMode in particular must NOT appear inside cfg2,
+live in their own keys; RadarMode in particular must not appear inside cfg2,
 which carries watch-bound keys exclusively.
 
-'RadarArchive' is the temporary gallery-capture key: an ISO timestamp makes
-index.js pull the radar layer from IEM's archived NEXRAD WMS instead of live
-MRMS. See screenshots.md.
+'RadarArchive' is read only by the temporary radarUrl() patch in
+screenshots.md: an ISO timestamp there makes index.js pull the radar layer
+from IEM's archived NEXRAD WMS instead of live MRMS.
 
 Usage: seed.py <platform> <scenario-id> [scenarios.json]
 """
@@ -21,25 +21,21 @@ import os
 import shutil
 import sys
 
-# Read from package.json rather than hardcoded: the localstorage file is named
-# for the app UUID, so a stale copy here seeds a store no emulator reads, exits
-# 0, and renders the whole gallery at watch-side defaults -- the same silent
-# double failure the SDK-version note below describes.
+# Read from package.json: the localstorage file is named for the app UUID, and
+# a stale hardcoded copy would seed a store no emulator reads, exit 0, and
+# render the whole gallery at watch-side defaults.
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "..", "..", "package.json")) as _f:
     APP_UUID = json.load(_f)["pebble"]["uuid"]
 
-# That directory is keyed on the ACTIVE SDK version (pebble-tool's
-# sdk/__init__.py get_sdk_persist_dir), so a hardcoded version is a silent
-# double failure after an SDK switch: the wipe and the seed both land in a
-# directory no emulator reads, seed.py still exits 0, and the tile renders at
-# watch-side defaults against an un-wiped flash. Resolve it from the active SDK
-# instead. PEBBLE_EMULATOR_VERSION pins an older one, for regenerating a
-# gallery against its original firmware -- pass the same value to capture.sh,
-# which forwards it as --sdk. Note that pinning only works if the .pbw was
-# built by that SDK too: a newer build stamps a higher SDK minor and older
-# firmware refuses to install it, so pin with `pebble sdk activate <ver>` and a
-# rebuild, not with this variable alone.
+# The persist directory is keyed on the active SDK version (pebble-tool's
+# sdk/__init__.py get_sdk_persist_dir). A hardcoded version would, after an SDK
+# switch, wipe and seed a directory no emulator reads, still exit 0, and render
+# every tile at watch-side defaults against an un-wiped flash.
+# PEBBLE_EMULATOR_VERSION pins another version; pass the same value to
+# capture.sh, which forwards it as --sdk. Pinning also needs the .pbw rebuilt
+# under that SDK (`pebble sdk activate <ver>`), because older firmware refuses a
+# bundle stamped with a newer SDK minor.
 _ROOT = os.path.expanduser("~/.local/share/pebble-sdk")
 _VER = os.environ.get("PEBBLE_EMULATOR_VERSION")
 if not _VER:
@@ -55,10 +51,9 @@ def main():
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "scenarios.json")
     scen = next(s for s in json.load(open(path)) if s["id"] == sid)
 
-    # A stale blob is worse than none: sizeof(Settings) did not change when
-    # radar_mode was removed, so a previous-layout blob still passes
-    # load_settings()'s guard and misparses into invisible text. Wipe both the
-    # persisted watch settings and the whole localstorage dir every time.
+    # Wipe the watch flash and the whole localstorage dir every time. The flash
+    # holds the last run's settings and persisted composite, which the face
+    # draws at launch before the cfg2 replay or any transfer lands.
     flash = os.path.join(SDK, platform, "qemu_spi_flash.bin")
     if os.path.exists(flash):
         os.remove(flash)                       # re-extracted from the SDK on boot

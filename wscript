@@ -1,8 +1,6 @@
 #
-# Pebble wscript build configuration
-#
-# This file should be placed in the root of your watchface project.
-# Usually no modifications are needed.
+# Builds the watch app for each targetPlatforms entry and bundles src/pkjs as
+# the phone JS. Trimmed from the SDK app template: no worker, no src/common.
 #
 
 top = '.'

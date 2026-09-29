@@ -7,13 +7,10 @@ contact sheet per platform. Regenerating them is `screenshots/tools/capture.sh
 <platform> <id>`, but **two temporary source patches have to be reapplied
 first** — see [Reproducing](#reproducing).
 
-This file is the gallery's own record. General emulator behaviour — `--vnc`,
-`pkill`, one-shell-invocation, localstorage seeding, which `emu-*` commands
-work — lives in the workspace `CLAUDE.md`, and is referenced rather than
-repeated here. Facts that ended up in both (the radar-source survey, the
-`emu-set-time` traps, the decode ceilings) are carried in full there; what
-appears here is the gallery-specific consequence plus a pointer. If you change
-one, check the other.
+General emulator behaviour, such as `--vnc`, `pkill`, one shell invocation,
+localstorage seeding and which `emu-*` commands work, lives in the workspace
+`CLAUDE.md`. The radar-source survey, the `emu-set-time` traps and the decode
+ceilings appear in both files; change them together.
 
 ## The radar imagery is archived, not live
 
@@ -33,45 +30,37 @@ Three things about the archive that are worth not rediscovering:
 - **`TIME` needs full seconds.** `2026-08-10T21:00Z` returns a MapServer
   PostGIS error as a WMS XML exception under HTTP 200, which `fetchPng()` would
   report only as a transcode failure.
-- **Same `TIME` → byte-identical composite.** Verified: 0.00% pixel diff, same
-  8,595 B. Captures are reproducible and the `tx_hash` cache is not fought.
-- **The colour ramp is not the shipped one**, so the radar colours in these
-  tiles are not the colours the shipped face renders — accepted for gallery
-  imagery only. CLAUDE.md's "On swapping the radar source" note in the Image
-  pipeline section carries the survey behind that: how far the two ramps differ,
-  why this source may not ship, and why NOAA's own time-enabled service — which
-  *is* faithful — could not be used here either.
+- **Same `TIME` → byte-identical composite**, so captures are reproducible and
+  the `tx_hash` cache is not fought.
+- **The colour ramp is not the shipped one.** IEM serves the classic NWS ramp,
+  which the shipped MRMS layer does not use, so these tiles do not show the
+  shipped colours. That is accepted for gallery imagery only; this source must
+  not ship. NOAA's own time-enabled service matches the shipped ramp but keeps
+  only four hours, too little for a gallery. CLAUDE.md's "On swapping the radar
+  source" has the survey.
 
-Every chosen frame was verified through the real pipeline (`shrinkPng` →
-`buildComposite`) at all three display sizes before any emulator ran, using the
-per-platform decode ceilings in CLAUDE.md's Memory section. Worst utilisation is
-New Orleans on gabbro at **20,538 B against a 28,986 B ceiling (71%)** — a
-harder case than anything the earlier live sweep found, so those table rows were
-updated from this run. (This line previously read 29,968 B / 69%, which
-disagreed with CLAUDE.md's table by 982 B: it never absorbed the persisted-
-composite `.text` cost. The figure above is the SDK 4.33 re-measurement and now
-matches. The `verify` percentages in `scenarios.json` were recomputed against
-the corrected ceilings afterwards — every gabbro row, and New Orleans on emery,
-had been left against the superseded ones.)
+Every chosen frame was checked through the real pipeline (`shrinkPng` →
+`buildComposite`) at all three display sizes before any emulator ran, against
+the per-platform decode ceilings in CLAUDE.md's Memory section. The worst is
+New Orleans on gabbro at **20,538 B, about three quarters of that platform's
+ceiling**. `scenarios.json` records each frame's bytes under `verify`; its
+percentages are against a larger build heap than the current one, so recompute
+them from the bytes before quoting one.
 
 ### How the frames were chosen
 
-A scan sampled the archive 4×/day across a season per city (~250–600 samples
-each, ~16 s per 250), scoring each frame on wet coverage, warm-colour (high
-dBZ) fraction and tier count.
+A scan sampled the archive four times a day across a season per city, scoring
+each frame on wet coverage, warm-colour (high dBZ) fraction and tier count.
 
-The first objective simply maximised those, and it was **wrong**: it returned
-90%+ coverage every time — Hurricane Ida over New Orleans at 95.8% wet — and a
-tile that is a solid slab of colour with no visible basemap is not a watchface
-screenshot. The scoring now rewards coverage only inside a 15–45% band and
-penalises it past that, so the map still reads underneath. One tile (New
-Orleans) is deliberately pinned outside the band because Francine's eye is
-worth more than the score.
+Coverage is rewarded only inside a 15–45% band and penalised past it.
+Maximising it picks frames that are a solid slab of colour with no visible
+basemap, which is not a watchface screenshot. New Orleans is deliberately
+pinned outside the band because Francine's eye is worth more than the score.
 
 ## The twelve tiles
 
 Slot columns are in **display order**: Top 1 / Top 2 / Bottom 1 / Bottom 2.
-Fonts are XS/S/M/L/XL, `L*` meaning "Large, shrink to fit".
+Fonts are XS/S/M/L/XL, a `*` meaning shrink to fit.
 
 | # | Location | Radar frame (UTC) | Zoom | Mode | Clock | Fmt | Slots | Fonts | Text / outline | Other |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -84,24 +73,24 @@ Fonts are XS/S/M/L/XL, `L*` meaning "Large, shrink to fit".
 | 07 | Denver CO | 2025-06-26 02:55 | City | translucent | Tue 06:50 | 24h | Heart Rate / Time / Steps / Distance | XS, L, XS, XS | green / black | health slots (stubbed, see below) |
 | 08 | Phoenix AZ | 2024-07-26 02:45 | State | opaque | Fri 20:33 | 12h | — / Time / ISO Date / — | XL, M | orange / black | monsoon cells, battery 21% |
 | 09 | Seattle WA | 2024-12-07 17:55 | Region | translucent | Mon 15:20 | 24h | Conditions / Time / Weekday / Bluetooth | XS, L, S, XS | white / dark blue | **metric units**; all-low-dBZ rain |
-| 10 | New York NY | 2025-09-05 03:20 | City | opaque | Sun 09:07 | 12h | — / Time / Date / — | XL, M | black / yellow | dark-on-light inversion |
-| 11 | Washington DC | 2025-07-31 18:10 | State | opaque | Sat 23:48 | 24h | High-Low / Time / Date / Battery | XS, L, XS, XS | white / dark red | metric; battery 15% |
+| 10 | New York NY | 2025-09-05 03:20 | City | opaque | Mon 09:07 | 12h | — / Time / Sunrise-Sunset / Humidity | XL, M\*, XS | black / yellow | dark-on-light inversion |
+| 11 | Washington DC | 2025-07-31 18:10 | State | opaque | Sat 23:48 | 24h | High-Low / Time / Wind / Pressure | XS, L, XS, XS | white / dark red | metric; battery 15% |
 | 12 | Honolulu HI | 2025-03-17 05:50 | City | translucent | Fri 14:26 | 12h | Lat/Long / Time / Weekday / — | XS, L, S | navy / white | non-CONUS, Lat/Long slot |
 
 Coverage of the variety axes: **zoom** City ×5, State ×4, Region ×3 · **radar
 mode** translucent ×6, opaque ×6 · **clock** 12h ×7, 24h ×5 · **line count** 1,
-2, 3 and 4 all present · **units** imperial ×10, metric ×2 · every font size
-including shrink-to-fit · twelve distinct text/outline colour pairs · slot kinds
-Time, Date, Weekday, ISO Date, Battery, Bluetooth, Heart Rate, Steps, Distance,
-Radar Age, Lat/Long, Current Conditions, Today's Forecast, High/Low and
+2, 3 and 4 all present · **units** imperial ×10, metric ×2 · every fixed size
+except Super Large, plus two shrink-to-fit sizes · twelve distinct text/outline
+colour pairs · slot kinds Time, Date, Weekday, ISO Date, Battery, Bluetooth,
+Heart Rate, Steps, Distance, Radar Age, Lat/Long, Current Conditions, Today's
+Forecast, High/Low, Humidity, Wind, Pressure, Sunrise/Sunset and
 Alerts-else-Conditions.
 
 **The weather strings are live, not historical.** `api.weather.gov` has no
-usable archive (its `/alerts` endpoint accepts `start`/`end` but retains only
-about a week — measured: Aug 4 returns, Aug 1 is empty), and gridpoint
-forecasts are current-only. So a tile pairs 2024 radar with today's forecast
-text. That is deliberate and was agreed; the strings are there to show the
-slots working, not to describe the storm.
+usable archive: `/alerts` retains about a week and gridpoint forecasts are
+current-only. So a tile deliberately pairs archived radar with the capture
+day's weather text, which is there to show the slots working, not to describe
+the storm.
 
 ## Watch clock
 
@@ -112,13 +101,16 @@ motion — is in CLAUDE.md under "Running the emulator from a non-graphical
 shell". What is specific to this gallery:
 
 - Eleven tiles are set **backwards**, to spread times of day and weekdays across
-  the sheet. Backwards is unbounded, so those values are free.
+  the sheet. Backwards is free except for a sun slot: the phone computes the
+  span for the real date, and the watch renders a span that starts after its own
+  tomorrow as a date. Tile 10 shows Sunrise/Sunset, so move its `clock` to the
+  capture date before re-capturing it.
 - **Tile 04 is the exception**, set to `now + 7 min`, because it is the tile that
   displays Radar Age — `watch_now - s_radar_time` — and a backwards clock clamps
   that to `0 min`. Seven minutes reads as a plausible age and stays far inside
   the 3 h weather window.
-- `emu-set-time` no-opped once in 36 captures here (emery/12, which came out at
-  wall-clock time and was simply re-run). Read the tiles back.
+- `emu-set-time` occasionally no-ops, leaving a tile at wall-clock time. Read
+  the tiles back and re-run any that did.
 
 ## Reproducing
 
@@ -141,17 +133,14 @@ function radarUrl(bbox) {
 }
 ```
 
-and change the radar fetch in `locationSuccess()` (the call at `index.js:1406`) from
+and change the radar fetch in `locationSuccess()` from
 `fetchPng(exportUrl(RADAR_URL, bbox, true), …)` to `fetchPng(radarUrl(bbox), …)`.
 
 **2. `src/c/main.c`** — fake the health slots, needed only by tile 07.
-Under SDK 4.33 `emu-steps` works on emery and gabbro but **basalt still
-no-ops** (its QEMU image is byte-identical to 4.17's), and `emu-heart-rate`
-leaves the slot at `-- bpm` everywhere — so the stub is still required for a
-full three-platform sweep. See CLAUDE.md for the per-platform detail and for
-the two ways this test yields a false positive (positional args, and testing
-with the stub still applied). Insert at the top of `format_slot()`, before its
-`switch`:
+`emu-steps` no-ops on basalt and `emu-heart-rate` leaves the slot at `-- bpm`
+everywhere, so a three-platform sweep needs this stub. Revert it before running
+`emu-probe.sh`, which would otherwise report a false positive. Insert at the
+top of `format_slot()`, before its `switch`:
 
 ```c
   switch (kind) {
@@ -165,9 +154,7 @@ with the stub still applied). Insert at the top of `format_slot()`, before its
 Then `pebble build`, and:
 
 ```sh
-for p in emery basalt gabbro; do
-  for i in $(seq 1 12); do bash screenshots/tools/capture.sh "$p" "$i"; done
-done
+bash screenshots/tools/sweep.sh "emery basalt gabbro" "1 2 3 4 5 6 7 8 9 10 11 12"
 ```
 
 About 40 s per tile, ~25 minutes for all 36. Revert both patches afterwards and
@@ -175,28 +162,30 @@ About 40 s per tile, ~25 minutes for all 36. Revert both patches afterwards and
 
 ### The tools
 
-- `screenshots/tools/scenarios.json` — the twelve scenarios: location, radar
-  timestamp, zoom, mode, units, battery, clock, and the full `cfg2` blob.
+- `screenshots/tools/scenarios.json` — the twelve tiles plus the two diff gates
+  below: location, radar timestamp, zoom, mode, units, battery, clock, and the
+  full `cfg2` blob.
 - `screenshots/tools/seed.py` — writes one scenario into a platform's pypkjs
   `dbm.dumb` localStorage (`cfg2` plus the phone-side keys), after wiping
   `qemu_spi_flash.bin` and the whole localstorage directory. Both the seeding
   format and why the wipe is mandatory rather than hygiene are in CLAUDE.md.
   It does not write `TimelineAlerts`, so every tile runs at that setting's *on*
-  default: one extra alerts fetch and one failing timeline-token attempt per
-  tile, both harmless and neither visible in the capture. Seed the key to `'0'`
-  if a scenario needs the off arm.
+  default: one extra alerts fetch per tile, plus a `TL insertTimelinePin
+  unavailable` log line when the point has a severe alert. Neither is visible
+  in the capture. Seed the key to `'0'` if a scenario needs the off arm.
 - `screenshots/tools/capture.sh` — one tile end to end, ~40 s. `GALLERY_DIR`
   redirects the output; `PEBBLE_EMULATOR_VERSION` pins the emulator's SDK and
-  is forwarded to every emulator-touching command as `--sdk`.
+  is forwarded to every emulator-touching command as `--sdk`. The `.pbw` must be
+  built by that SDK too.
 - `screenshots/tools/sweep.sh` — drives `capture.sh` over a set of platforms
   and scenarios. It exists so the invoking command line is just
   `bash sweep.sh …`: `capture.sh` runs `pkill -f 'qemu-pebbl[e]'`, and the
   bracket trick only stops the pattern matching *its own* literal — a loop
   typed at the prompt that mentions qemu would be killed by it.
 - `screenshots/tools/pixdiff.py` — pixel-diffs two gallery trees and reports
-  differing-pixel counts per tile. ImageMagick's `compare` is **not** installed
-  here; this uses PIL. A missing tile is reported, not skipped, so an absent
-  file cannot read as a pass.
+  differing-pixel counts per tile, using PIL. Tiles are enumerated from the
+  first tree; one missing from the second is reported rather than skipped, but
+  one missing from the first is never compared.
 - `screenshots/tools/emu-probe.sh` — re-tests the firmware-dependent emu-*
   commands after an SDK upgrade, with the health stub reverted and
   non-colliding injection values.
@@ -204,9 +193,10 @@ About 40 s per tile, ~25 minutes for all 36. Revert both patches afterwards and
   marketing banners in `screenshots/banner/`, one per platform. No emulator
   involved: the watch screen is a `screenshots/store/` PNG at native pixels and
   the backdrop is a plain topo+radar fetch at banner size. Rationale and the
-  build command are in `STORE.md` under Marketing banner. If a gallery
-  re-capture changes `screenshots/store/`, re-run `banner.py` — it reads those
-  files directly.
+  build command are in `STORE.md` under Marketing banner. `screenshots/store/`
+  holds renamed copies of gallery tiles 02, 11, 05, 03 and 10; after
+  re-capturing any of those, re-copy it and re-run `banner.py`, which reads the
+  store files.
 
 **Two scenarios are diff gates rather than gallery tiles.** 13
 (`autofont-deterministic`) puts three of four slots on auto fonts with every
@@ -215,17 +205,16 @@ string deterministic — Lat/Long, Time, Date, ISO date, no weather and no healt
 says must never be judged by eye. 14 (`textwidth-stress`) puts **both outer
 bands** on Weekday at a fixed Extra Small font, where a round display's chord is
 narrowest — so any change in text metrics or in outer-band placement moves those
-glyphs and shows up as a diff. Both were captured on all three platforms before
-and after the 4.17→4.33 upgrade and came back **0 differing pixels**.
+glyphs and shows up as a diff. Neither gate uses Super Large, fixed or
+shrink-to-fit.
 
-Be clear about what 14 does *not* cover, because its slug oversells it. Weekday
-is `strftime("%A")`, formatted entirely watch-side (`main.c`, `format_slot()`),
-so it never touches `fitWx`/`budgetFor`/`CHAR_BUDGET_*` — those apply only to
-the weather slots (15–21), whose strings are cut on the phone. Nor does it reach
-a truncation boundary: the seeded clock renders `Saturday`, and the longest
-weekday is `Wednesday` at 9 characters, far inside any budget. **The phone-side
-width fitting and the watch's trailing ellipsis have no diff gate.** Covering
-them would need a scenario on a weather slot seeded with a long `WX_*` string.
+Despite its slug, 14 does not cover width fitting. Weekday is `strftime("%A")`
+in `format_slot()`, formatted watch-side, so it never reaches
+`fitWx`/`budgetFor`/`CHAR_BUDGET_*`, which apply only to the phone-formatted
+weather slots (15–28 and 31). Nor does it reach a truncation boundary: at its
+Extra Small font even `Wednesday` fits easily. **The phone-side width fitting
+and the watch's trailing ellipsis have no diff gate**; covering them would need
+a weather slot seeded with a long `WX_*` string.
 
 **Comparing two gallery passes.** `capture.sh` writes straight over the
 committed tile, so a before/after comparison must redirect one pass or it
@@ -239,8 +228,8 @@ GALLERY_DIR=/tmp/gallery-new bash screenshots/tools/sweep.sh "emery basalt gabbr
 python3 screenshots/tools/pixdiff.py /tmp/gallery-old /tmp/gallery-new
 ```
 
-Expect 0 on every tile **except** 03, whose top band carries a live NWS weather
-string. Tiles whose only diff is the clock digits are the intermittent
+Expect 0 on every tile **except** 03 and 10, which carry live NWS weather
+strings. Tiles whose only diff is the clock digits are the intermittent
 `emu-set-time` no-op, not a regression — confirm by checking that the
 phone-side `Composite … hash <h>` line matches across the two runs, which
 settles whether the *image* changed independently of the text.
@@ -250,6 +239,5 @@ the exit status of `emu-time-format`, `emu-battery` and `emu-set-time` (each
 tries to launch a *second* emulator and exits 1 if the flags are missing), and
 it polls the log for `Decoded composite` with a 240 s deadline instead of
 sleeping a fixed interval. It also keeps the whole emulator sequence inside one
-shell invocation and drives `pkill` from a script file — both load-bearing, and
-both explained in CLAUDE.md. Do not inline its commands into a compound shell
-command.
+shell invocation and drives `pkill` from a script file, for reasons given in
+CLAUDE.md; do not inline its commands into a compound shell command.

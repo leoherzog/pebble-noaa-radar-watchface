@@ -1,17 +1,10 @@
 /**
  * Phone-side compositing: blend the USGS topo basemap and the NOAA MRMS
- * reflectivity overlay into ONE 16-color 4bpp PNG, so the watch holds a single
- * frame instead of two and never composites at draw time.
- *
- * Everything here is pure arithmetic over typed arrays: no Pebble APIs, no
- * localStorage, no module-level state. Width and height are PARAMETERS, never
- * captured — index.js's IMG_W/IMG_H are reassigned at 'ready' from the
- * connected watch's platform, and a module that captured them at load time
- * would render emery-sized imagery on basalt.
- *
- * Strict ES5 (var, no Map/Set, no arrow functions): this ships through the
- * pkjs bundler alongside index.js, which deliberately avoids ES5 object
- * statics and newer collection types.
+ * reflectivity overlay into one 16-color 4bpp PNG, so the watch holds a single
+ * frame and never composites. Pure and node-requirable, in strict ES5 for the
+ * legacy pkjs runtime. Width and height are parameters, never captured:
+ * index.js reassigns IMG_W/IMG_H at 'ready', so a load-time capture would
+ * render emery-sized imagery on basalt.
  */
 
 // zlib for the IDAT. Declared in package.json rather than leaned on as a
@@ -26,23 +19,18 @@ var pako = require('pako');
 // Per pixel, one 6-bit display color (2 bits per channel, 0..3 each):
 //
 //   a = radarAlpha >> 6                          (0..3)
-//   translucent && a == 3  ->  a = 2             (was main.c's palette rewrite)
+//   translucent && a == 3  ->  a = 2
 //   a == 0  ->  floor(basemap)   >>6 per channel
 //   a == 3  ->  floor(radar)     >>6 per channel
 //   else    ->  round(blend)     round(v/85) per channel, f = a/3
 //
-// The asymmetry is deliberate and is the whole point: DO NOT RE-QUANTIZE A
-// VALUE YOU DID NOT COMPUTE. Where alpha is 0 or 3 the output IS a source
-// color, so it passes through with exactly the >>6 the watch itself would have
-// applied — which keeps opaque mode pixel-exact with what the watch renders
-// today. Only genuinely blended pixels are rounded to nearest, because
-// flooring a linear mix lands it in the wrong bucket and reads muddy.
-// Measured: rounding everywhere shifts the NWS ramp a full tier (yellow reads
-// as orange, i.e. moderate rain looks heavy); flooring everywhere makes
-// translucent muddy. This split rule is the one that gets both.
+// The asymmetry is deliberate: never re-quantize a value you did not compute.
+// Where alpha is 0 or 3 the output is a source color and passes through with
+// the watch's own >>6; only blended pixels are rounded to nearest. Rounding
+// everywhere shifts the NWS ramp a full tier (yellow reads as orange, so
+// moderate rain looks heavy); flooring everywhere makes translucent muddy.
 //
-// In translucent mode the a === 3 branch is unreachable by construction (alpha
-// 3 was downgraded to 2). That is correct, not dead code.
+// The a === 3 branch is unreachable in translucent mode and needed in opaque.
 //
 // The tier label used by the fold is the radar SOURCE color (floored to 6-bit)
 // wherever a > 0, and -1 elsewhere.
@@ -64,7 +52,7 @@ function buildComposite(bmRgba, rdRgba, radarMode, w, h) {
     var a = 0, sr = 0, sg = 0, sb = 0;
     if (rdRgba) {
       a = rdRgba[p + 3] >> 6;                    // 0..3
-      if (translucent && a === 3) a = 2;         // was main.c's palette rewrite
+      if (translucent && a === 3) a = 2;
       sr = rdRgba[p]; sg = rdRgba[p + 1]; sb = rdRgba[p + 2];
     }
     var out;
@@ -122,25 +110,18 @@ function buildComposite(bmRgba, rdRgba, radarMode, w, h) {
 // ---------------------------------------------------------------------------
 //
 // After mapping to the display's 2-bits-per-channel space the composite is
-// ALREADY an indexed image of at most 64 colors (19-29 in practice), so the
-// palette is ENUMERATED, never searched for. UPNG.encode(..., 16) must never
-// be run on the composite: that generic quantizer dithers and minimizes
-// squared error as if the image were continuous-tone, and measured it gets
-// 13-43% of pixels wrong — yellow bands render as solid orange, red cores
-// vanish.
+// already indexed, at most 64 colors, so the palette is enumerated, never
+// searched for. Never run UPNG.encode(..., 16) on it: that quantizer dithers
+// as if the image were continuous-tone, turning yellow bands orange and
+// erasing red cores.
 //
-// When the enumeration exceeds 16 entries it is folded, and the fold POLICY
-// matters more than anything else here. Merging by "fewest pixels changed"
-// alone eats the high-dBZ cores, because they are the rarest pixels.
-// Protecting everything radar-derived is also wrong: under translucency nearly
-// every color is radar-derived, so the damage just moves to the basemap (one
-// measured test went 0.04% -> 26% of pixels). The correct rule, and the only
-// one that measured zero tier damage: NEVER merge two different reflectivity
-// tiers. Merging within a tier, or between two non-radar colors, is free.
-// Do not touch the cost function.
+// Above 16 entries the palette is folded, and the policy matters most.
+// Merging by fewest pixels changed eats the rare high-dBZ cores; protecting
+// everything radar-derived moves the damage to the basemap under
+// translucency. So two different reflectivity tiers merge only as a last
+// resort (cost x 1e9); merging within a tier or with a non-radar color costs
+// normally. Do not touch the cost function.
 function foldTo16(hist, tier) {
-  // Float64, not Int32: dist * pop * 1e9 reaches ~9e18, which a double holds
-  // exactly enough for ordering and an int32 does not hold at all.
   var h = new Float64Array(64), map = new Uint8Array(64), cols = [];
   var c, i, j;
   for (c = 0; c < 64; c++) {
@@ -169,8 +150,8 @@ function foldTo16(hist, tier) {
     for (c = 0; c < 64; c++) if (map[c] === drop) map[c] = keep;
     h[keep] += h[drop];
     h[drop] = 0;
-    // tier[] is fixed at build time and never updated during folding: a
-    // survivor keeps its own label. This matches the validated reference.
+    // tier[] is fixed before folding and never updated: a survivor keeps its
+    // own label.
     cols.splice(cols.indexOf(drop), 1);
   }
   // cols was built ascending and splice preserves order, so the emitted
@@ -201,8 +182,8 @@ function foldTo16(hist, tier) {
 //   - No tRNS: absent alpha means GColorFromRGBA(..., UINT8_MAX) => a = 3,
 //     fully opaque. Correct — the composite is opaque and the watch draws it
 //     at the default GCompOpAssign.
-//   - uPNG does not verify chunk CRCs, but emit correct ones anyway: upng-js,
-//     used by the offline checks, does.
+//   - uPNG does not verify chunk CRCs; emit correct ones anyway so the file
+//     stays a valid PNG for any other decoder.
 
 var SIG = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 
@@ -283,9 +264,10 @@ function png4(idx, pal, w, h) {
 // Content hash
 // ---------------------------------------------------------------------------
 
-// FNV-1a 32-bit over the emitted PNG bytes, length-prefixed. The shift form of
-// the prime multiply avoids depending on Math.imul; the length prefix costs
-// nothing and removes the whole class of same-length collisions.
+// FNV-1a 32-bit over the emitted PNG bytes, with the length prepended to the
+// result so inputs of different lengths never collide. The shift form of the
+// prime multiply avoids depending on Math.imul. Bytes only: on a JS string
+// every non-digit character XORs in as 0.
 function hashBytes(b) {
   var h = 0x811C9DC5;
   for (var i = 0; i < b.length; i++) {

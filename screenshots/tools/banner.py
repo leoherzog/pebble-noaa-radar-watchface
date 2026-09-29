@@ -2,9 +2,9 @@
 """Build 720x320 appstore marketing banners from the staged store screenshots.
 
 One banner per platform, since the Pebble/Rebble portals keep a separate asset
-collection per platform. Everything is drawn from assets already in the repo:
-the hero screenshot goes in a drawn watch frame, and the background is another
-screenshot from the same set, scaled up.
+collection per platform. The hero store screenshot goes in a drawn watch frame
+over a backdrop: by default the topo+radar fetch from banner_bg.py, or with
+--style bleed/crisp another store screenshot scaled up.
 
     uv run --with pillow python screenshots/tools/banner.py            # all three
     uv run --with pillow python screenshots/tools/banner.py --style crisp
@@ -28,15 +28,15 @@ F_BOLD = os.path.join(FONT_DIR, "RedHatDisplay-Bold.otf")
 F_MED = os.path.join(FONT_DIR, "RedHatText-Medium.otf")
 F_SEMI = os.path.join(FONT_DIR, "RedHatText-Bold.otf")
 
-# Hero = the screenshot inside the watch. Backdrop = the screenshot blown up
-# behind it. Deliberately different scenes so the banner does not read as one
-# image duplicated at two sizes.
+# Hero = the screenshot inside the watch. Backdrop = the screenshot the bleed
+# and crisp styles blow up behind it, a different scene so the banner does not
+# read as one image at two sizes.
 HERO = "1_minneapolis-derecho"
 BACKDROP = "2_washington-dc-severe"
 DEFAULT_BG = "washington-dc-severe"   # scenario 11, fetched by banner_bg.py
 
 # shape:  how the display and the body are drawn
-# scale:  pixel scale for the screenshot (1.5 is done as x3 nearest, then /2 box)
+# scale:  nearest-neighbour pixel scale for the screenshot
 # bezel:  body inset around the display, (x, y) for rect / single value for round
 PLATFORMS = {
     "emery": {"shape": "rect", "scale": 1.0, "bezel": (18, 26), "name": "Pebble Time 2"},
@@ -68,10 +68,9 @@ def shot(platform, scene):
 
 
 def pixel_scale(img, scale):
-    """Nearest-neighbour only -- these are 16-colour 4bpp frames and any
-    interpolation turns the halo'd slot text to mush. At basalt's 1.5x the
-    uneven pixel split is visible on glyph stems and still reads sharper than
-    the x3-then-box alternative, which was tried and looked soft."""
+    """Nearest-neighbour only: any interpolation turns the halo'd slot text to
+    mush. At basalt's 1.5x the uneven pixel split shows on glyph stems but reads
+    sharper than x3-then-box downsampling."""
     if scale == 1.0:
         return img
     return img.resize((int(img.width * scale), int(img.height * scale)), Image.NEAREST)
@@ -158,8 +157,8 @@ def watch(platform):
 
 
 def backdrop(platform, style, bg_path=None):
-    """720x320 background: a real topo+radar fetch if one has been made
-    (banner_bg.py), else a screenshot blown up, else flat."""
+    """720x320 background by style: photo = the banner_bg.py fetch,
+    bleed/crisp = a store screenshot blown up, panel = flat."""
     if style == "panel":
         return Image.new("RGBA", (W, H), (18, 20, 24, 255))
 

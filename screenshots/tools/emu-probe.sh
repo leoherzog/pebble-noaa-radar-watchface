@@ -4,25 +4,25 @@
 #
 # Boots scenario 07 by default (the only one with health slots: Heart Rate,
 # Steps, Distance), injects values, and screenshots. Both optional arguments are
-# passed straight through to seed.py. Run it ONLY as
-# `bash emu-probe.sh <platform>` -- same pkill reasoning as capture.sh.
+# passed straight through to seed.py. Run it only as
+# `bash emu-probe.sh <platform>`, for the same pkill reason as capture.sh.
 #
 # Two rules this script exists to enforce:
 #
-#  1. The format_slot() health STUB must be reverted before running this. The
+#  1. The format_slot() health stub must be reverted before running this. The
 #     stub prints 10247 / 4.6 mi / 72 bpm, and the real code path formats
 #     identically, so with the stub in place every platform renders those values
-#     whether or not the firmware handler exists -- a guaranteed false positive.
-#     The injected values below are deliberately chosen NOT to collide with it.
+#     whether or not the firmware handler exists: a guaranteed false positive.
+#     The injected values below are chosen not to collide with it.
 #
-#  2. emu-steps and emu-heart-rate take POSITIONAL arguments, not --steps/--bpm.
+#  2. emu-steps and emu-heart-rate take positional arguments, not --steps/--bpm.
 #     With a flag they exit 2 on an argparse error before touching the
 #     emulator, which reads as "the command ran and did nothing".
 #
-# Every command carries --emulator and --vnc spelled out. A flagless one does
-# not merely fail: it SIGKILLs the running QEMU because the VNC state differs,
-# then spawns a replacement with no display, which dies. So the flagless arm is
-# deliberately NOT tested here -- it would destroy the emulator under test.
+# Every command carries --emulator and --vnc spelled out. A flagless one
+# SIGKILLs the running QEMU because the VNC state differs, then spawns a
+# replacement with no display, which dies. So the flagless arm is not tested
+# here: it would destroy the emulator under test.
 set -uo pipefail
 
 P="${1:?platform}"

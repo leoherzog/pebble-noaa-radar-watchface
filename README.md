@@ -13,11 +13,11 @@ Your phone does the heavy lifting: it figures out where you are, fetches the map
 - 🗺️ **Full-screen live radar** over a topographic basemap, with a marker at your exact position
 - 📍 **Follows you around** — the map re-centers when you move, or set a fixed location manually
 - 🔍 **Three zoom levels** — City (100 km), State (250 km), or Region (500 km) across the screen
-- 📝 **Four configurable text lines** — Time, Date, Weekday, Steps, Distance, Calories, Sleep, Heart Rate, Battery, Bluetooth, Radar Age, Lat/Long, and more, each with its own font size (including "shrink to fit")
+- 📝 **Four configurable text lines** — Time, Date, Weekday, Steps, Distance, Calories, Sleep, Heart Rate, Battery, Bluetooth, Radar Age, Lat/Long, and more, each with its own font size from Extra Small up to Super Large, fixed or "shrink to fit"
 - 🖍️ **Custom text and outline colors** — every line is drawn with a halo outline so it stays readable over busy map areas, and both colors are yours to pick
 - 🌦️ **Weather from the National Weather Service** — current conditions, temperature, feels like, dew point, humidity, wind, pressure, today's forecast, tonight/tomorrow, high/low, and active alerts, in imperial or metric units
 - 🌅 **Sunrise/sunset and golden hour** — computed on your phone from your exact position rather than fetched, so they don't depend on a nearby weather station, and shown in your watch's own 12- or 24-hour format
-- ⚠️ **Alert-aware lines** — show your normal weather until a watch or warning takes over the line, and alerts clear themselves when they expire even if your phone is out of reach
+- ⚠️ **Alert-aware lines** — show your normal weather until an NWS alert takes over the line, or pick "Alerts, else Upcoming, else Conditions" to also count down to an alert that hasn't started yet. Alerts clear themselves when they expire, even if your phone is out of reach
 - 🗓️ **Severe alerts in your timeline** — tornado, severe thunderstorm, flash flood and other severe or extreme NWS alerts show up as timeline pins that run for as long as the alert does, then quietly age out on their own. Pins can take several minutes to arrive, so treat them as a record of what's in force, not as a siren
 - 🎨 **Translucent, opaque, or disabled radar** — or use it as a plain topo map face
 - 📶 **Bluetooth badge** — a Bluetooth rune appears in the top-left the moment your phone goes out of range, so you know the radar has stopped updating
@@ -27,7 +27,7 @@ Radar, basemap, and weather data come from [NOAA](https://mapservices.weather.no
 
 ## Installation
 
-Build it with the [Pebble SDK](https://developer.rebble.io/developer.pebble.com/sdk/index.html). Prebuilt `.pbw` bundles, once any are published, will appear on the [Releases page](../../releases) for side-loading.
+Install it from the [Pebble appstore](https://apps.repebble.com/2029ab9c84f946e1b125f8e0), or build it yourself with the [Pebble SDK](https://developer.rebble.io/developer.pebble.com/sdk/index.html):
 
 ```bash
 # Clone the repository

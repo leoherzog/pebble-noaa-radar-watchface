@@ -1,60 +1,35 @@
 /**
  * NOAA US Weather Radar — Pebble watchface
  *
- * Fullscreen live radar map centered on the user's location. PebbleKit JS
- * fetches both imagery layers (USGS Topo basemap + NOAA MRMS base
- * reflectivity), BLENDS THEM INTO ONE 16-color image on the phone, and streams
- * that single composite here as raw PNG bytes over AppMessage, decoded with
- * gbitmap_create_from_png_data(). The watch holds one frame and draws it; it
- * does no compositing, no translucency and no layer selection of its own.
- * Doing the blend on the phone is what frees a whole FRAME_BYTES of heap --
- * see DECODE_HEADROOM below.
- *
- * Four configurable text slots (Clay) stack around the middle: Top Line 2
- * and Bottom Line 1 sit centered on the 25% and 75% height lines, with
- * Top Line 1 above the former and Bottom Line 2 below the latter -- see
- * apply_slot_layout() for the two cases that override this: a short screen
- * pulls the inner anchors inward, and an outer line whose inner neighbour is
- * None centres in its edge quarter instead of stacking against the vacated
- * anchor. The exact screen center carries a small location marker,
- * and the top-left corner carries a Bluetooth badge while the phone is
- * unreachable.
- *
- * Battery-efficient: MINUTE_UNIT ticks only. No floating point.
+ * Fullscreen radar map centered on the user's location. PebbleKit JS blends a
+ * USGS Topo basemap with NOAA MRMS reflectivity into one 16-color PNG and
+ * streams it here over AppMessage; the watch decodes and draws that frame and
+ * overlays four configurable text slots (see apply_slot_layout()), a center
+ * marker and a Bluetooth badge. MINUTE_UNIT ticks only, no floating point.
  */
 
 #include <pebble.h>
 
-// Bumped from 1 when the blob became versioned. A version byte alone could not
-// safely reject the old layout -- byte 0 there was a slot code, which can hold
-// the same value as a version number -- so the unversioned blob is orphaned
-// under key 1 instead of being read and misparsed. `pebble wipe` clears it;
-// nothing reads it.
+// Key 1 may hold an unversioned pre-release blob whose first byte can equal a
+// version number, so it is never read or reused. `pebble wipe` clears it.
 #define SETTINGS_KEY 2
 
 // ---- Persisted composite ---------------------------------------------------
-// The frame lives only in heap, so every relaunch -- and a watchface is
-// relaunched every time the user opens the menu and comes back -- used to start
-// on the grey rect until a whole transfer arrived. The PNG the last successful
-// decode came from is cached here instead, and restored in init() before the
-// first render.
+// The frame lives only in heap, and a watchface relaunches every time the user
+// opens the menu and comes back, so the PNG the last successful decode came
+// from is cached here and restored in init() before the first render.
 //
-// A persist VALUE is capped at 256 B (PERSIST_DATA_MAX_LENGTH) on every
-// platform, so the bytes are split across IMG_MAX_KEYS consecutive keys with a
-// small versioned header in IMG_META_KEY. Keys start well above SETTINGS_KEY;
-// key 1 is the orphaned pre-versioning settings blob.
+// A persist value is capped at 256 B (PERSIST_DATA_MAX_LENGTH) on every
+// platform, so the bytes span up to IMG_MAX_KEYS keys from IMG_DATA_KEY, with
+// a versioned header in IMG_META_KEY.
 //
-// The per-APP total is what differs, and it is a firmware capability rather
-// than a platform fact, so it is queried rather than assumed: measured in QEMU,
-// emery and gabbro report 1 MiB and store 51,200 B without complaint, while
-// basalt reports 4,096, fills at 5,632 B and then fails EVERY subsequent write
-// including overwrites of existing keys -- which would silently break the
-// persist_write_data(SETTINGS_KEY, ...) in inbox_received_callback(), the only
-// place settings are written. A composite does not fit there in the
-// first place (5,632 B of store against a 7,873 B worst-case composite), so the
-// gate below both keeps the feature off basalt and keeps it from ever filling a
-// store it shares with the settings. On a platform where the macro is a literal
-// the comparison folds at compile time and the bodies vanish.
+// The per-app total is a firmware capability, so it is queried, not assumed.
+// basalt reports 4,096 B, fills at 5,632 B against a 7,873 B worst-case
+// composite, and once full fails every later write including overwrites of
+// existing keys, which would silently break the settings write in
+// inbox_received_callback(). The gate keeps the cache off any store it could
+// fill. Where persist_get_max_size() is a literal the comparison folds at
+// compile time and the bodies vanish.
 #define IMG_META_KEY        3
 #define IMG_DATA_KEY        16
 #define IMG_MAX_KEYS        96                 // 96 * 256 = 24,576 B
@@ -66,23 +41,20 @@
 #define SLOT_NONE 4       // "None" in the slot-code list below
 
 // A decoded frame is a fullscreen 16-color PNG: 4bpp palettized, rows padded
-// to a byte. Decoding costs that output bitmap plus an inflate buffer of the
-// same order -- 2x the frame -- and the budget below adds half a frame of
-// slack for allocator overhead and fragmentation.
+// to a byte. The firmware decoder (upng.c upng_decode_image) inflates into one
+// buffer of FRAME_BYTES plus a byte per row, unfilters it in place, and the
+// GBitmap adopts that buffer. A decode therefore costs about one frame plus
+// small transient decoder state; the compressed input is budgeted separately.
+// The rest of DECODE_HEADROOM's 2.5x is slack for allocator overhead and for
+// fragmentation, since the frame buffer is one contiguous block, so the budget
+// is conservative for a 4bpp decode.
 //
-// The slack has to be proportional, not fixed. emery's original guard asked a
-// flat 64 KB, which is 2.9x its frame and affordable only because its heap is
-// 5.2 frames deep; basalt's heap is only 4.3 frames deep, so a multiplier that
-// is free on emery starves it. 2.5x is what basalt can carry.
-//
-// Only ONE frame is ever resident now that pkjs composites the two layers
-// before sending, so the peak this guards fell from ~3.5x FRAME_BYTES (two
-// resident frames + a decode) to ~2.5x (one resident frame, destroyed before
-// its replacement decodes). The arithmetic below is unchanged; what changed is
-// that heap_bytes_free() is a whole frame larger when it runs. Two consequences
-// worth knowing: disabling radar no longer frees a bitmap (the composite is
-// always one full frame), and clear weather is no longer nearly free (an
-// all-transparent radar PNG used to collapse to a ~1 KB decode).
+// The slack must be proportional, not fixed: heap depth in frames differs by
+// platform, so a multiplier that is free on emery starves the others. gabbro,
+// whose heap holds the fewest frames, is the platform 2.5x has to fit. It
+// fits because only one frame is ever resident: pkjs does the blend, and the
+// resident frame is destroyed before its replacement decodes. That frame is
+// always full-size, even with radar disabled or a clear sky.
 #define FRAME_BYTES     (((PBL_DISPLAY_WIDTH + 1) / 2) * PBL_DISPLAY_HEIGHT)
 #define DECODE_HEADROOM (FRAME_BYTES * 5 / 2)
 
@@ -98,27 +70,13 @@ enum { SLOT_TOP1, SLOT_TOP2, SLOT_BOT1, SLOT_BOT2 };
 // 27 Pressure, 28 Tonight/Tomorrow, 29 Sunrise/Sunset, 30 Golden hour,
 // 31 Alerts else upcoming else Conditions.
 //
-// The persisted blob is VERSIONED, not inferred. load_settings() accepts it
-// only when its length and its version byte both match this build, and falls
-// back to defaults otherwise -- so fields may be added, removed, reordered or
-// retyped freely: bump SETTINGS_VERSION and the stale blob is discarded rather
-// than misread. Nothing here is append-only any more.
-//
-// That is a deliberate trade. The previous scheme inferred a blob's vintage
-// from its LENGTH, which forced every field into append order and broke down
-// entirely when a new field fit inside the struct's tail padding (sizeof did
-// not change, so a stale blob was indistinguishable from a current one) --
-// each such field then needed its own in-band "0 means unset" sentinel. The
-// cost of versioning is that a layout change resets every watch-bound setting
-// once -- nine dropdowns, a toggle and two colors, as the struct below stands.
-// The cost of the old scheme was paid by every future author.
-//
-// !! READ THE TRIPWIRE BELOW BEFORE TOUCHING THIS NUMBER OR THE STRUCT. !!
-// radar_mode was removed from this struct when compositing moved to the phone,
-// and SETTINGS_VERSION was deliberately NOT bumped, on the explicit instruction
-// that nobody runs this build yet. That is only safe because every dev device
-// is wiped (`pebble wipe`, plus the pkjs localstorage directory) -- it is NOT
-// safe in general, for the reason the tripwire spells out.
+// The persisted blob is versioned: load_settings() accepts it only when its
+// length and version byte both match this build, and otherwise keeps the
+// defaults. Bump SETTINGS_VERSION for any layout change (add, remove, reorder
+// or retype a field); every watch-bound setting then resets once. Length is
+// not a version: a reorder, a same-size retype or a field added in the three
+// padding bytes before lat100 all keep sizeof, and without a bump a blob
+// already on a user's watch passes both checks and is silently misparsed.
 #define SETTINGS_VERSION 1
 
 typedef struct {
@@ -138,28 +96,11 @@ typedef struct {
   int32_t lon100;
 } Settings;
 
-// TRIPWIRE, and a warning about the one that got away.
-//
-// Removing radar_mode did NOT change sizeof(Settings). The struct declared 14
-// bytes before the two int32s and now declares 13; both pad to 16, so sizeof
-// stayed 24 (verified by compiling both layouts with this project's own
-// arm-none-eabi-gcc -mcpu=cortex-m3 -mthumb). load_settings() validates length
-// AND version, and the version was deliberately not bumped -- so a blob written
-// by the PREVIOUS build passes both arms of that guard and is misparsed one byte
-// early: text_argb reads the old radar_mode (0/1/2, a GColor8 with a == 0, i.e.
-// INVISIBLE slot text), outline_argb reads the old text_argb, and the two tail
-// bytes survive only by luck. Silent, with no symptom but a face that renders
-// no text. Wiping the watch is the only cure; this build ships assuming that
-// happened, because the face has no users yet.
-//
-// This is the second time this project has hit the "tail padding absorbed the
-// field" hazard -- it is exactly why length inference was abandoned for a
-// version byte (see the block above). If you change this layout again, the
-// answer is to BUMP SETTINGS_VERSION, not to reason about whether sizeof moved.
-//
-// _Static_assert is C11 and the SDK's -std is not guaranteed, hence the
-// portable negative-array form. If this fires, the layout changed: bump
-// SETTINGS_VERSION, then update the number here.
+// Tripwire for layout changes that move sizeof. It cannot see one that keeps
+// sizeof, which is why SETTINGS_VERSION is bumped for every layout change.
+// If it fires, bump SETTINGS_VERSION, then update the number here.
+// Negative-array form because _Static_assert is C11 and the SDK builds with
+// -std=c99.
 typedef char settings_layout_check[(sizeof(Settings) == 24) ? 1 : -1];
 
 // ============================================================================
@@ -177,16 +118,14 @@ static uint32_t   s_rx_total;       // 0 when idle
 static uint32_t   s_rx_len;         // bytes written so far
 static bool       s_decode_retry;   // one re-request per failed decode
 static char       s_slot_bufs[NUM_SLOTS][32];
-// When PKJS FETCHED the radar layer behind the composite on screen -- not when
-// the watch decoded anything. The phone sends it explicitly (RADAR_TIME),
-// because with the transfer cache an unchanged composite is not re-sent, so a
-// decode is no longer a reliable heartbeat for the Radar Age slot. 0 = the
-// radar layer is disabled.
+// When pkjs fetched the radar layer behind the composite on screen, sent as
+// RADAR_TIME; not a decode time, since an unchanged composite is not re-sent.
+// 0 = the radar layer is disabled.
 static time_t     s_radar_time;
-// What the persisted composite holds, mirrored in RAM so the common case --
-// the phone re-sending a frame we already cached, which is exactly what a
-// relaunch produces -- costs a checksum rather than ~35 flash writes.
-// s_saved_len 0 means "nothing cached that matches what is on screen".
+// What the persisted composite holds, mirrored in RAM so that the phone
+// re-sending a frame we already cached (what every relaunch produces) costs a
+// checksum rather than a rewrite of every key. s_saved_len 0 means "nothing
+// cached that matches what is on screen".
 static uint32_t   s_saved_len;
 static uint32_t   s_saved_sum;
 static int32_t    s_saved_stamp;
@@ -203,7 +142,7 @@ static char   s_wx_temp[32], s_wx_feels[32], s_wx_dew[32], s_wx_hum[32];
 static char   s_wx_wind[32], s_wx_pres[32], s_wx_fcst2[32];
 static time_t s_wx_time;                  // WX_TIME, for staleness
 static time_t s_wx_exp, s_wx_exp2;        // per-slot alert expiry
-// Sun events, as absolute instants rather than finished strings -- the ONE
+// Sun events, as absolute instants rather than finished strings -- the one
 // weather group the phone cannot format, because 12/24-hour is
 // clock_is_24h_style(), a watch setting that never leaves the watch. Four
 // int32s also cost less than four more 32-byte buffers. 0 = no such event
@@ -211,11 +150,8 @@ static time_t s_wx_exp, s_wx_exp2;        // per-slot alert expiry
 static time_t s_wx_sunrise, s_wx_sunset;
 static time_t s_wx_gold1, s_wx_gold2;     // golden hour span, start and end
 
-// Both arrays are in display order, so these are plain lookups. They were
-// switch statements until the blob became versioned: the two original slots
-// had to keep their historical positions in the struct, and display order
-// could not be an index. The historical NAMES survive on the wire only, and
-// only inside the key table in inbox_received_callback().
+// Both arrays are in display order. The historical wire names are mapped to
+// display order only in inbox_received_callback()'s key tables.
 static uint8_t slot_kind(int i) {
   return s_settings.slots[i];
 }
@@ -231,10 +167,9 @@ static uint8_t slot_font_raw(int i) {
 #define FONT_SUPER 5   // ladder index of Super Large
 #define NUM_FONTS  6
 
-// Auto: raw 5..9 and 11 ONLY. An out-of-range byte (a future encoding block
-// saved by a newer build, or plain corruption) reads as FIXED Extra Large via
-// slot_font()'s clamp below — the same answer the pre-auto binary gave it —
-// rather than silently becoming "auto, ceiling XL".
+// Auto: raw 5..9 and 11 only. An out-of-range byte (a newer encoding, or
+// corruption) reads as fixed Extra Large via slot_font()'s clamp rather than
+// as "auto, ceiling XL".
 static bool slot_font_auto(int i) {
   uint8_t f = slot_font_raw(i);
   return (f >= 5 && f <= 9) || f == 11;
@@ -274,15 +209,15 @@ static const int8_t FONT_OFF[NUM_FONTS] = {  9, 11, 14, 16, 18, 25 };
 #define TEXT_MARGIN 4
 
 // The band an auto line shrinks inside is fixed by apply_slot_layout() from
-// the CEILING font; only the glyph placement inside it follows the resolved
+// the ceiling font; only the glyph placement inside it follows the resolved
 // font. s_resolved caches the last placed font per slot so update_slots()
 // re-places only when the resolved size actually changed.
 static int16_t s_band_y[NUM_SLOTS], s_band_h[NUM_SLOTS];
 static uint8_t s_resolved[NUM_SLOTS];
 
 // Largest ladder step whose text fits the band on one line.
-// Measured with GTextOverflowModeWordWrap, NOT TrailingEllipsis: the ellipsis
-// mode reports the size of the TRUNCATED text, so every font would appear to
+// Measured with GTextOverflowModeWordWrap, not TrailingEllipsis: the ellipsis
+// mode reports the size of the truncated text, so every font would appear to
 // fit and the loop would always return the ceiling. The fit test is on
 // height, not width -- the box is two lines tall and wrapping to a second
 // line is the failure condition, which also catches a long single word that
@@ -291,7 +226,7 @@ static uint8_t s_resolved[NUM_SLOTS];
 static uint8_t resolve_font(int i, const char *s, int16_t band_w) {
   uint8_t max = slot_font(i);
   if (!slot_font_auto(i) || !s || !s[0]) {
-    // Fixed lines always take their configured size; an EMPTY string resolves
+    // Fixed lines always take their configured size; an empty string resolves
     // to the ceiling, so the line does not sit tiny and then jump when the
     // value arrives (Steps before health data).
     return max;
@@ -309,13 +244,10 @@ static uint8_t resolve_font(int i, const char *s, int16_t band_w) {
 }
 
 // Vertically centre the resolved font in its fixed band (TextLayer has no
-// vertical centering of its own -- a Small font in a Large band would float
-// at the top of it). place_slot() NEVER consults neighbouring slots, which is
-// the property that guarantees a re-size cannot cascade. A None slot keeps
-// its zero-height frame regardless of the resolved font.
-// `w` is the unobstructed width both callers already hold. Passing it rather
-// than re-deriving it here keeps the frame exactly as wide as the width the
-// layout math used, and drops this function's dependency on s_main_window.
+// vertical centering of its own). place_slot() never consults neighbouring
+// slots, which guarantees a re-size cannot cascade. A None slot keeps its
+// zero-height frame regardless of the resolved font. `w` is the unobstructed
+// width the caller's layout math used.
 static void place_slot(int i, uint8_t f, int16_t w) {
   int16_t h = (slot_kind(i) == SLOT_NONE) ? 0 : FONT_H[f];
   layer_set_frame(text_layer_get_layer(s_slot_layers[i]),
@@ -327,12 +259,9 @@ static void place_slot(int i, uint8_t f, int16_t w) {
 // TEXT SLOTS
 // ============================================================================
 
-// Conditions / forecast / high-low: "--" when there is no data or when the
-// payload is stale (phone unreachable for WX_MAX_AGE).
-// Takes `now` rather than reading the clock itself, matching fmt_alert below:
-// cases 20/21 call both, and one instant per format_slot() keeps an alert's
-// expiry test and a payload's staleness test from landing on either side of a
-// second boundary.
+// Weather strings: "--" when there is no data or the payload is stale (phone
+// unreachable for WX_MAX_AGE). Takes `now` like fmt_alert, so cases 20, 21
+// and 31, which call both, test expiry and staleness against one instant.
 static void fmt_wx(char *buf, size_t size, const char *src, time_t now) {
   if (!s_wx_time || now - s_wx_time > WX_MAX_AGE || src[0] == '\0') {
     snprintf(buf, size, "--");
@@ -341,10 +270,10 @@ static void fmt_wx(char *buf, size_t size, const char *src, time_t now) {
   }
 }
 
-// Alerts: empty string when the buffer is empty OR when now > exp. An alert
+// Alerts: empty string when the buffer is empty or when now > exp. An alert
 // self-clears on its own NWS expiry even if the phone is unreachable, so a
 // disconnected watch can never keep displaying a warning that has lapsed.
-// Alerts deliberately do NOT fall back to "--": absence of an alert and
+// Alerts deliberately do not fall back to "--": absence of an alert and
 // absence of data render identically, and of the two failure directions,
 // showing nothing is the honest one.
 static void fmt_alert(char *buf, size_t size, const char *src,
@@ -356,23 +285,19 @@ static void fmt_alert(char *buf, size_t size, const char *src,
   }
 }
 
-// Render an absolute instant as a wall-clock time in the watch's OWN 12/24
-// style. The sun slots arrive as numbers precisely so this can happen here:
-// clock_is_24h_style() is a watch setting the phone never sees, which is the
-// same constraint that makes the phone's alert lead times relative ("in 45m")
-// rather than absolute.
+// Render an absolute instant as a wall-clock time in the watch's own 12/24
+// style. clock_is_24h_style() never leaves the watch, which is why the sun
+// slots arrive as numbers.
 //
-// The meridiem is a single letter -- "6:12a", not the Time slot's "6:12am" --
-// and that asymmetry is deliberate. Strings built HERE get none of the
-// phone's width machinery: no char budget, no abbreviation table, no ladder
-// of shorter forms. The character saved is spent on the golden-hour range,
-// which has to fit two times and a separator in one slot.
+// The meridiem is a single letter ("6:12a"). Strings built here get none of
+// the phone's width machinery (char budget, abbreviation table, shorter-form
+// ladder), and the saved character lets a golden-hour range fit two times and
+// a separator in one slot.
 static void fmt_clock(char *buf, size_t size, time_t t, bool meridiem) {
   // localtime() honours the time_t passed to it (pbl_override_localtime ->
   // sys_localtime_r in reference/PebbleOS/src/fw/applib/pbl_std/pbl_std.c),
-  // so an arbitrary instant formats correctly -- but it fills a SHARED
-  // app-state tm, so the fields must be consumed before the next call rather
-  // than held across one. fmt_gold below is the caller that has to care.
+  // but fills a shared app-state tm, so consume its fields before the next
+  // call. fmt_span is the caller that has to care.
   struct tm *lt = localtime(&t);
   if (clock_is_24h_style()) {
     snprintf(buf, size, "%02d:%02d", lt->tm_hour, lt->tm_min);
@@ -384,15 +309,12 @@ static void fmt_clock(char *buf, size_t size, time_t t, bool meridiem) {
   }
 }
 
-// A sun time is displayable while it is still ahead, plus one refresh
-// interval of grace.
-//
-// fmt_wx's staleness rule does not fit these: an instant does not go stale,
-// it merely passes. pkjs always sends the NEXT occurrence, so a value only
-// falls into the past between heartbeats and the following one replaces it --
-// without the grace the Sunrise slot would blank AT sunrise, which is exactly
-// when someone is looking at it. Past the grace the phone is unreachable and
-// the value really is wrong, so it blanks.
+// A span end is displayable while it is still ahead, plus one refresh
+// interval of grace. An instant does not go stale the way fmt_wx's data does;
+// it passes. pkjs sends the next span whose end is ahead, so an end falls
+// behind only between heartbeats, and without the grace the slot would blank
+// from that end until the next heartbeat. Past the grace the phone is
+// unreachable and the value really is wrong.
 static bool sun_showable(time_t t, time_t now) {
   return t != 0 && now - t <= (time_t)s_settings.refresh_min * 60;
 }
@@ -401,29 +323,15 @@ static bool is_leap(int year) {
   return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
 }
 
-// True when the event is past TOMORROW in local calendar terms, and so cannot
-// be labelled by a clock time alone.
+// True when the event is past tomorrow in local calendar terms, where a bare
+// clock time would read as today. Inside the Arctic a sun event can be days
+// out, and then the date is the useful half.
 //
-// A sun event is normally today or tomorrow and a bare "6:12a" reads
-// naturally. Inside the Arctic it can be DAYS out — Utqiagvik's next sunrise
-// during polar night is up to five — and a clock time for an instant two days
-// away reads as this morning. By then the slot is answering a different
-// question ("when does the sun come back"), for which the date is the useful
-// half and the minute is noise.
-//
-// The test is the CALENDAR, not a lead-time threshold, and that is a
-// correction rather than a preference: a fixed cutoff was tried and the
-// measured lead times turned out to be a smooth continuum with no gap to put
-// one in — 3 to 4 samples in every hour bucket from 24 h to 167 h across a
-// year at every NWS site. Any threshold therefore mislabels real cases on one
-// side or the other. Fort Yukon at 14:00 on 6 July has its next sunset at
-// 01:31 local on 8 July: 35.5 h, which a 36 h cutoff renders as "1:31a" for
-// an event two days out. "today or tomorrow" has no such failure by
-// construction, since that is exactly when a bare clock time is unambiguous.
-//
-// Compared on local yday/year rather than by dividing seconds, because a
-// local day is not 86,400 s long across a DST change. Events are at most a
-// week out, so only the same-year and next-year cases can arise.
+// The test is the calendar, not a lead-time cutoff: real lead times run as a
+// continuum from 24 h to a week, so any cutoff mislabels some. Compared on
+// local yday/year rather than by dividing seconds, because a local day is not
+// 86,400 s long across a DST change. Events are within a week either way, so
+// only adjacent years can arise.
 static bool sun_far(time_t t, time_t now) {
   struct tm *lt = localtime(&now);
   int nyday = lt->tm_yday, nyear = lt->tm_year;
@@ -434,11 +342,10 @@ static bool sun_far(time_t t, time_t now) {
   } else if (lt->tm_year == nyear + 1) {
     diff = lt->tm_yday + (is_leap(1900 + nyear) ? 366 : 365) - nyday;
   } else if (lt->tm_year == nyear - 1) {
-    // BEHIND us, across New Year. Reachable: fmt_gold passes the START of a
-    // window that is in progress, so at 00:30 on 1 January a window that
-    // opened at 22:45 on 31 December lands here. It is not "far" — it is now —
-    // and without this arm it would fall to the catch-all below and render
-    // "Dec 31" instead of the range, on that one night a year.
+    // Behind us, across New Year. Reachable: fmt_span passes the start of a
+    // window in progress, so at 00:30 on 1 January a window that opened at
+    // 22:45 on 31 December lands here. It is now, not far; the catch-all
+    // below would render "Dec 31".
     return false;
   } else {
     return true;               // more than a year out, which cannot be soon
@@ -446,18 +353,17 @@ static bool sun_far(time_t t, time_t now) {
   return diff > 1;
 }
 
-// "Jan 23" rather than a clock time. Its own helper because fmt_gold needs
-// the same answer for a window whose start is that far out.
+// "Jan 23": the label for an event past tomorrow.
 static void fmt_sun_date(char *buf, size_t size, time_t t) {
   strftime(buf, size, "%b %d", localtime(&t));
 }
 
-// A pair of instants as a range, "7:48-8:31p". Used by BOTH sun slots --
+// A pair of instants as a range, "7:48-8:31p". Used by both sun slots --
 // Sunrise/Sunset is the daylight span, Golden Hour the golden one -- because
 // the two are the same shape and the phone sends each as a coherent pair
 // rather than as two independently-resolved "next" values.
 //
-// Keyed on the END being showable, so a span already in progress keeps
+// Keyed on the end being showable, so a span already in progress keeps
 // rendering rather than blanking halfway through: that is what lets the
 // Sunrise/Sunset slot go on showing this morning's sunrise all afternoon, and
 // it matches how the phone chooses which span to send.
@@ -467,12 +373,12 @@ static void fmt_span(char *buf, size_t size, time_t a, time_t b, time_t now) {
     return;
   }
   // A window days out gets its date instead of a range: two clock times and a
-  // separator say nothing about WHICH day, and there is no room for both.
+  // separator say nothing about which day, and there is no room for both.
   if (sun_far(a, now)) {
     fmt_sun_date(buf, size, a);
     return;
   }
-  // Both meridiems are read BEFORE either string is built: localtime returns
+  // Both meridiems are read before either string is built: localtime returns
   // a pointer to one shared tm, so the second call would otherwise overwrite
   // the first one's answer.
   struct tm *lt = localtime(&a);
@@ -480,10 +386,10 @@ static void fmt_span(char *buf, size_t size, time_t a, time_t b, time_t now) {
   lt = localtime(&b);
   bool pm_b = lt->tm_hour >= 12;
   char s1[12], s2[12];
-  // One meridiem, on the end, whenever both ends share it -- the normal case,
-  // since every golden window is bounded by sunrise or sunset. At high
-  // latitudes a window CAN straddle noon (an Arctic winter sunrise after
-  // 11:00), and then each end carries its own.
+  // One meridiem, on the end, whenever both ends share it, which is the
+  // normal case for a golden window. A daylight span straddles noon, as can a
+  // golden window at high latitudes (an Arctic winter sunrise after 11:00),
+  // and then each end carries its own.
   fmt_clock(s1, sizeof(s1), a, pm_a != pm_b);
   fmt_clock(s2, sizeof(s2), b, true);
   snprintf(buf, size, "%s-%s", s1, s2);
@@ -580,7 +486,7 @@ static void format_slot(uint8_t kind, bool super, char *buf, size_t size) {
       break;
     }
     case 13:  // Radar age
-      // s_radar_time is the PHONE's fetch clock, so the difference can come out
+      // s_radar_time is the phone's fetch clock, so the difference can come out
       // negative when the two clocks disagree; clamp rather than print "-1 min".
       if (s_radar_time) {
         int mins = (int)((now - s_radar_time) / 60);
@@ -608,7 +514,7 @@ static void format_slot(uint8_t kind, bool super, char *buf, size_t size) {
     case 19: fmt_alert(buf, size, s_wx_alert2, s_wx_exp2, now); break;
     case 20:  // alert, else high/low
     case 21:  // alert, else current conditions
-      // The alert is tested FIRST, so a stale-data "--" can never mask a live
+      // The alert is tested first, so a stale-data "--" can never mask a live
       // alert; fmt_alert's empty string is the "no alert" signal, so expiry
       // and staleness are already handled by the two helpers. Both branches
       // run every update_slots() call (once a minute), which is what makes
@@ -620,9 +526,9 @@ static void format_slot(uint8_t kind, bool super, char *buf, size_t size) {
       break;
     case 31:  // alert, else upcoming alert, else current conditions
       // In-effect alerts strictly first. WX_ALERT2 is the top-ranked alert of
-      // ALL of them, so once nothing is in effect it is the next upcoming one,
-      // with its lead time ("in 3h"). Same expiry and staleness handling as
-      // cases 20/21, one step longer.
+      // all of them, so once nothing is in effect it is the top-ranked upcoming
+      // one, with its lead time ("in 3h"). Same expiry and staleness handling
+      // as cases 20/21, one step longer.
       fmt_alert(buf, size, s_wx_alert, s_wx_exp, now);
       if (buf[0] == '\0') {
         fmt_alert(buf, size, s_wx_alert2, s_wx_exp2, now);
@@ -657,10 +563,8 @@ static void update_slots(void) {
     // formatted result does not fit, so start every slot from an empty string.
     tmp[0] = '\0';
     format_slot(slot_kind(i), slot_font(i) == FONT_SUPER, tmp, sizeof(tmp));
-    // Re-resolve only when the string actually changed -- Time changes once a
-    // minute, Steps a few times an hour, alerts rarely, Battery hardly at all.
-    // Fixed lines resolve straight to their configured size, so they can
-    // never see a resolved change here and never re-place.
+    // Re-resolve only when the string changed. Fixed lines resolve straight
+    // to their configured size, so they never re-place.
     if (strcmp(tmp, s_slot_bufs[i]) != 0) {
       strcpy(s_slot_bufs[i], tmp);
       uint8_t f = resolve_font(i, s_slot_bufs[i], b.size.w);
@@ -668,14 +572,13 @@ static void update_slots(void) {
         s_resolved[i] = f;
         place_slot(i, f, b.size.w);   // the band is fixed; only the glyphs move
       }
-      // Inside the branch on purpose. text_layer_set_text() does NOT compare
-      // (PebbleOS applib/ui/text_layer.c -- unlike set_text_color and friends it
-      // has no early return), so calling it unconditionally dirtied the window
-      // on every update_slots(), which repaints the whole layer tree. That made
-      // the redraw flag in inbox_received_callback() and connection_callback()'s
-      // layer_mark_dirty() dead code. The layers already point at these buffers
-      // (bound once in main_window_load), so re-pointing when nothing changed
-      // bought nothing but the repaint.
+      // Inside the branch on purpose: text_layer_set_text() has no equality
+      // check (PebbleOS applib/ui/text_layer.c), and its dirty repaints the
+      // whole layer tree. Called unconditionally, it would make the redraw
+      // flag in inbox_received_callback() and connection_callback()'s
+      // layer_mark_dirty() dead code. The layers already point at these
+      // buffers (bound in main_window_load), so this call is only for the
+      // repaint.
       text_layer_set_text(s_slot_layers[i], s_slot_bufs[i]);
     }
   }
@@ -703,21 +606,19 @@ static void apply_slot_layout(void) {
     h[i] = (slot_kind(i) == SLOT_NONE) ? 0 : FONT_H[f[i]];
   }
 
-  // The inner pair keeps the 25%/75% height lines it has always used; the
-  // outer pair takes the full height of its own frame immediately beyond it,
-  // so raising either inner line's size pushes its outer neighbour outward
-  // rather than overlapping it.
+  // The inner pair sits on the 25%/75% height lines; the outer pair takes the
+  // full height of its own frame immediately beyond it, so raising either
+  // inner line's size pushes its outer neighbour outward rather than
+  // overlapping it.
   int inner_top = b.size.h / 4 - FONT_OFF[f[SLOT_TOP2]];
   int inner_bot = b.size.h * 3 / 4 - FONT_OFF[f[SLOT_BOT1]];
 
-  // ...but a short display may not have room beyond those lines for the outer
-  // pair. With all four lines occupied at the default sizes, basalt's 168 px
-  // would hang Top Line 1 4 px off the top and Bottom Line 2 4 px off the
-  // bottom; emery's 228 px has the slack at every combination. Where the outer
-  // band does not fit, move the inner line inward to make room: the quarter
-  // lines are a preference, staying on screen is not. Only a font change, a
-  // slot switching to or from None, or an obstruction can trigger this, so the
-  // face still never moves in response to content alone.
+  // A short display may lack room for the outer pair beyond those lines
+  // (basalt, all four lines at default sizes). Where the outer band does not
+  // fit, move the inner line inward: the quarter lines are a preference,
+  // staying on screen is not. Only a font change, a slot switching to or from
+  // None, or an obstruction can trigger this, so the face never moves in
+  // response to content.
   if (inner_top < h[SLOT_TOP1]) {
     inner_top = h[SLOT_TOP1];
   }
@@ -725,10 +626,12 @@ static void apply_slot_layout(void) {
   if (inner_bot > bot_limit) {
     inner_bot = bot_limit;
   }
-  // A display too short to seat every occupied line at the chosen sizes -- the
-  // Quick View leaves basalt about 117 px, which four large lines exceed. The
-  // inner pair carries the primary readout, so it is the outer pair that gets
-  // pushed past the edge rather than the two inner lines colliding mid-screen.
+  // A display too short to seat every occupied line at the chosen sizes (the
+  // Quick View leaves basalt about 117 px, which four large lines exceed).
+  // The inner pair carries the primary readout, so rather than let the two
+  // inner lines collide mid-screen, the bottom lines stack below Top Line 2
+  // and run past the bottom edge, Bottom Line 2 first. Top Line 1 stays on
+  // screen: inner_top was already clamped to its height above.
   if (inner_bot < inner_top + h[SLOT_TOP2]) {
     inner_bot = inner_top + h[SLOT_TOP2];
   }
@@ -759,11 +662,10 @@ static void apply_slot_layout(void) {
     y[SLOT_BOT2] = yy;
   }
 
-  // The bands come from the CEILING font, so the numbers above are unchanged
-  // from the fixed-size layout; auto only moves glyphs inside these bands.
-  // Re-resolve against the current strings: a font or slot change can alter a
-  // ceiling. On an obstruction change the band WIDTH is unchanged, so the
-  // resolved sizes cannot change and this amounts to a re-place.
+  // Bands come from the ceiling font; auto only moves glyphs inside them.
+  // Re-resolve against the current strings, since a font or slot change can
+  // alter a ceiling. An obstruction change leaves band width unchanged, so it
+  // amounts to a re-place.
   for (int i = 0; i < NUM_SLOTS; i++) {
     s_band_y[i] = y[i];
     s_band_h[i] = h[i];
@@ -780,12 +682,10 @@ static void unobstructed_did_change(void *context) {
 // IMAGE REQUESTS
 // ============================================================================
 
-// Purely a corruption guard now that the blob is versioned -- it used to also
-// carry the "0 means the field predates this build" sentinel, which versioning
-// retired. A 0 would be a DIVISION BY ZERO in tick_handler's tm_min modulo,
-// not a cosmetic default, so it is applied at every write and not only at
-// load. Config values are divisors of 60 to keep that modulo aligned to the
-// hour; a non-divisor merely ticks unevenly, so it is not worth rejecting.
+// Corruption guard. A 0 would divide by zero in tick_handler's tm_min modulo,
+// so it is applied at every write as well as at load. Config values divide 60
+// to keep the heartbeat aligned to the hour; a non-divisor merely ticks
+// unevenly, so it is not rejected.
 static uint8_t sanitize_refresh(uint8_t m) {
   return (m == 0 || m > 60) ? 10 : m;
 }
@@ -798,7 +698,8 @@ static uint8_t sanitize_refresh(uint8_t m) {
 // The wire values are 2 and 1, never 0: pkjs gates on
 // `if (e.payload['REQUEST_IMAGES'])`, a truthiness test, so a 0 would be
 // silently ignored and the heartbeat would stop dead.
-//   2 = "I have no image" -> send unconditionally, bypassing the hash cache.
+//   2 = "I have no image" -> bypass the committed hash cache; bytes already
+//                            in flight or delivered this pass are not re-sent.
 //   1 = "I have one"      -> skip if the composite is unchanged.
 static void request_images(bool need_image) {
   DictionaryIterator *iter;
@@ -811,13 +712,10 @@ static void request_images(bool need_image) {
 static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
   update_slots();
 
-  // Heartbeat: refresh the composite (and weather, which rides the same request
-  // on the phone) every refresh_min minutes -- user-configurable, default 10,
-  // the MRMS update cadence. Two caches on the phone are keyed off the flag we
-  // send: pkjs commits its basemap cache key when the fetch succeeds, and its
-  // transfer hash when the last chunk is ACKed, so a transfer the watch refused
-  // or that pkjs gave up on is never re-offered unless the watch says it is
-  // still missing.
+  // Heartbeat: refresh the composite (and weather, which rides the same
+  // request on the phone) every refresh_min minutes. A transfer the watch
+  // refused is still ACKed chunk by chunk, so pkjs commits its hash and
+  // re-offers those bytes only when this flag says the watch has no frame.
   if (tick_time->tm_min % s_settings.refresh_min == 0) {
     request_images(!s_image);
   }
@@ -829,7 +727,7 @@ static void battery_callback(BatteryChargeState state) {
 
 static void connection_callback(bool connected) {
   update_slots();
-  // update_slots() only repaints when a slot's STRING changed, and the badge
+  // update_slots() only repaints when a slot's string changed, and the badge
   // does not depend on any slot -- with no Bluetooth slot configured, nothing
   // above would dirty anything and the badge would never appear or clear.
   if (s_map_layer) {   // a state change can beat the window load
@@ -841,7 +739,7 @@ static void connection_callback(bool connected) {
 // PERSISTED COMPOSITE
 // ============================================================================
 
-// Written LAST, so a write that dies partway through the data keys can never
+// Written last, so a write that dies partway through the data keys can never
 // look like a complete cache. Read back all-or-nothing, exactly like the
 // settings blob: wrong version, wrong size, impossible length or a checksum
 // that does not match means the whole cache is ignored, never partly trusted.
@@ -855,7 +753,7 @@ typedef struct {
 
 // FNV-1a. Not for security -- it is here so a torn or partially rewritten
 // cache is detected before the bytes reach the PNG decoder, which fails
-// SILENTLY (see the decode path) and would leave a blank face with no clue why.
+// silently (see the decode path) and would leave a blank face with no clue why.
 static uint32_t img_sum(const uint8_t *b, uint32_t n) {
   uint32_t h = 2166136261u;
   for (uint32_t i = 0; i < n; i++) {
@@ -913,7 +811,7 @@ static void save_image(const uint8_t *buf, uint32_t len) {
           (int)len, k);
 }
 
-// RADAR_TIME arrives in its own message AFTER the transfer it belongs to, so
+// RADAR_TIME arrives in its own message after the transfer it belongs to, so
 // the stamp save_image() could see was the previous frame's. Correcting it is
 // one 16-byte key, and it is what makes Radar Age honest at the instant a
 // restored frame appears -- the whole point of restoring one.
@@ -945,8 +843,8 @@ static bool load_image(void) {
   }
   // The same budget the header handler applies, for the same reason: a decode
   // that runs short hands back a GBitmap with a NULL pixel buffer rather than
-  // failing loudly. Nothing else is resident at init, so this is generous
-  // there; it is load-bearing on the post-failed-decode path.
+  // failing loudly. On emery and gabbro IMG_CACHE_MAX_BYTES keeps a cached
+  // frame inside it, so this is a backstop.
   if (heap_bytes_free() < m.len + DECODE_HEADROOM) {
     return false;
   }
@@ -1025,16 +923,13 @@ static void rx_reset(void) {
 
 static void inbox_received_callback(DictionaryIterator *iter, void *ctx) {
   // ---- Config block ----------------------------------------------------
-  // The only place the wire's historical naming is decoded. TopSlot/TopFont
-  // are Top Line 2 and BottomSlot/BottomFont are Bottom Line 1: those were the
-  // first two lines shipped, and the outer pair was added around them. The
-  // keys cannot be renamed without resetting every phone-side saved config,
-  // so they stay -- but the mapping to display order stops here, and nothing
-  // downstream of these tables knows about it.
+  // The only place the wire's historical naming is decoded: TopSlot/TopFont
+  // are Top Line 2 and BottomSlot/BottomFont are Bottom Line 1. The keys
+  // cannot be renamed without resetting every phone-side saved config, so the
+  // mapping to display order stops here.
   // Not static: MESSAGE_KEY_* are resolved at load time, not compile time, so
   // they cannot initialize a static array ("initializer element is not
-  // constant"). Two stack arrays per config message is not worth working
-  // around with a lazy-init.
+  // constant"). Two stack arrays per message are not worth a lazy-init.
   const uint32_t SLOT_KEYS[NUM_SLOTS] = {
     MESSAGE_KEY_TopSlot1, MESSAGE_KEY_TopSlot,
     MESSAGE_KEY_BottomSlot, MESSAGE_KEY_BottomSlot2
@@ -1046,8 +941,8 @@ static void inbox_received_callback(DictionaryIterator *iter, void *ctx) {
   Tuple *slot_t[NUM_SLOTS], *font_t[NUM_SLOTS];
   // One flag for both tuple kinds: they are only ever tested together, and a
   // slot switching to or from None changes the stack geometry just as a font
-  // change does, since a None line no longer reserves a band (see
-  // apply_slot_layout). Geometry depends on slot KIND, not only on font.
+  // change does, since a None line reserves no band (see
+  // apply_slot_layout). Geometry depends on slot kind, not only on font.
   bool slot_cfg_changed = false;
   for (int i = 0; i < NUM_SLOTS; i++) {
     slot_t[i] = dict_find(iter, SLOT_KEYS[i]);
@@ -1074,31 +969,23 @@ static void inbox_received_callback(DictionaryIterator *iter, void *ctx) {
     Settings prev;
     memcpy(&prev, &s_settings, sizeof(prev));
 
-    // Set by the branches that change what map_update_proc draws (OutlineColor,
-    // BtIndicator) and consumed once below. Deliberately NOT conditioned on the
-    // memcmp result: a re-save with unchanged values still repaints. Redrawing
-    // on every heartbeat's Lat/Lon message would be wasted work, which is why
-    // this is a flag and not an unconditional dirty.
-    //
-    // RadarMode used to set it too, and since every config save carried that
-    // key it was the de-facto catch-all repaint for the whole config page. It
-    // is gone (the mode is phone-side now), so the remaining setters have to
-    // stand on their own. TextColor deliberately does not set it: its setter
-    // calls text_layer_set_text_color, which dirties the text layers, and the
-    // firmware render walk repaints the ENTIRE layer tree on any dirty
-    // (reference/PebbleOS/src/fw/applib/ui/layer.c -- no per-layer dirty
-    // check), so the halo underneath repaints in the same pass.
+    // Set by the branches that change what map_update_proc draws
+    // (OutlineColor, BtIndicator) and consumed once below. Not conditioned on
+    // the memcmp: a re-save with unchanged values still repaints. A flag
+    // rather than an unconditional dirty, so the heartbeat's Lat/Lon message
+    // does not redraw. TextColor needs no flag: text_layer_set_text_color
+    // dirties the text layers, and the firmware render walk repaints the whole
+    // layer tree on any dirty (reference/PebbleOS/src/fw/applib/ui/layer.c),
+    // halo included.
     bool redraw = false;
 
     for (int i = 0; i < NUM_SLOTS; i++) {
       if (slot_t[i]) s_settings.slots[i] = (uint8_t)slot_t[i]->value->int32;
       if (font_t[i]) s_settings.fonts[i] = (uint8_t)font_t[i]->value->int32;
     }
-    // Zoom is deliberately absent, and RadarMode is now too: pkjs owns the bbox
-    // math and the blend, and re-composites and re-sends by itself when the
-    // webview closes. Translucency and the disabled case are both applied
-    // before the bytes ever leave the phone, so there is nothing here to store
-    // and nothing to redraw -- a mode change arrives as a new composite.
+    // Zoom and RadarMode are phone-side: pkjs owns the bbox math and the blend
+    // and re-sends a composite when the webview closes, so there is nothing
+    // here to store or redraw.
     if (lat_t)    s_settings.lat100      = lat_t->value->int32;
     if (lon_t)    s_settings.lon100      = lon_t->value->int32;
     // Colors arrive as 0xRRGGBB from the Clay color pickers; GColorFromHEX is
@@ -1142,7 +1029,7 @@ static void inbox_received_callback(DictionaryIterator *iter, void *ctx) {
 
   // ---- Weather block -----------------------------------------------------
   // One message carries every populated weather key, assembled on the phone.
-  // WX_TIME is the phone's FETCH time (pkjs replays its last payload on
+  // WX_TIME is the phone's fetch time (pkjs replays its last payload on
   // 'ready', so receipt-stamping would relabel hour-old data as fresh). No
   // apply_slot_layout() -- weather never changes slot geometry -- and no early
   // return, so an image transfer in the same callback path is unaffected.
@@ -1164,13 +1051,10 @@ static void inbox_received_callback(DictionaryIterator *iter, void *ctx) {
     Tuple *exp2_t = dict_find(iter, MESSAGE_KEY_WX_EXP2);
     if (exp_t)  s_wx_exp  = (time_t)exp_t->value->uint32;
     if (exp2_t) s_wx_exp2 = (time_t)exp2_t->value->uint32;
-    // Sun events. int32, like RADAR_TIME and for the same reason: pkjs
-    // marshals a plain JS number as a 4-byte int, and the union's smaller
-    // members are only valid for a smaller tuple. Unconditional within this
-    // block -- 0 is a MEANINGFUL value here (no such event at this latitude
-    // today), so these must be assigned, not skipped, when the key is absent
-    // or zero. The whole block only runs when WX_TIME is present, which is
-    // the same gate the strings above sit behind.
+    // Sun events. int32, like RADAR_TIME: pkjs marshals a plain JS number as
+    // a 4-byte int, and the union's smaller members are only valid for a
+    // smaller tuple. An absent key assigns 0 rather than skipping, because 0
+    // is meaningful here (no such event at this latitude today).
     Tuple *sr_t = dict_find(iter, MESSAGE_KEY_WX_SUNRISE);
     Tuple *ss_t = dict_find(iter, MESSAGE_KEY_WX_SUNSET);
     Tuple *g1_t = dict_find(iter, MESSAGE_KEY_WX_GOLD1);
@@ -1184,18 +1068,15 @@ static void inbox_received_callback(DictionaryIterator *iter, void *ctx) {
   }
 
   // ---- Radar timestamp ---------------------------------------------------
-  // pkjs's radar FETCH time, not a decode time: with the transfer cache an
-  // unchanged composite is not re-sent, so a decode is no longer a reliable
-  // heartbeat for the Radar Age slot and the timestamp has to travel
-  // explicitly. Sent at the commit point -- immediately on a skip, and from the
-  // final-chunk ACK on a send -- so a transfer that dies halfway advances
-  // nothing. 0 = the radar layer is disabled, which format_slot renders as
-  // "no radar". Its own block, not part of the config block above: it is not
-  // persisted settings and must not enter the memcmp-guarded persist.
+  // pkjs's radar fetch time, sent explicitly because a composite pkjs skips as
+  // unchanged is never decoded here. It arrives at the phone's commit point,
+  // so a transfer that dies halfway advances nothing. 0 = radar disabled
+  // ("no radar"). Kept out of the config block: it is not a setting and must
+  // not enter the memcmp-guarded persist.
   //
-  // int32, like every other numeric tuple here: pkjs marshals a plain JS number
-  // as a 4-byte int, and the union's uint8 member is only valid for a 1-byte
-  // tuple. Unix seconds fit in an int32 until 2038.
+  // Read as int32: pkjs marshals a plain JS number as a 4-byte int, and the
+  // union's uint8 member is only valid for a 1-byte tuple. Unix seconds fit
+  // in an int32 until 2038.
   Tuple *rt_t = dict_find(iter, MESSAGE_KEY_RADAR_TIME);
   if (rt_t) {
     s_radar_time = (time_t)rt_t->value->int32;
@@ -1210,21 +1091,17 @@ static void inbox_received_callback(DictionaryIterator *iter, void *ctx) {
     s_rx_total = total_t->value->uint32;
 
     // Reject the impossible, and refuse a transfer we cannot afford to decode.
-    // A decode that runs short fails silently -- the firmware hands back a
-    // GBitmap with a NULL pixel buffer (see the check after the decode below)
-    // -- and by then the frame being replaced is already destroyed, so the
-    // headroom is required up front rather than discovered afterwards.
-    // The phone emits the composite as a 16-color 4-bit PNG, so decoding costs
-    // the output bitmap plus an inflate buffer of the same order -- see
-    // DECODE_HEADROOM. That the source is 4bpp is a load-bearing promise from
-    // the phone, NOT something this guard enforces: an 8bpp source would need
-    // ~4x the frame against a 2.5x headroom, and a compressed one can pass both
-    // clauses here and still run short at decode. What contains that is the
-    // NULL-pixel-buffer check after the decode below, with the load_image()
-    // restore and re-request behind it.
+    // A decode that runs short fails silently (a GBitmap with a NULL pixel
+    // buffer, checked after the decode below), and by then the frame being
+    // replaced is already destroyed, so the headroom is required up front.
+    // DECODE_HEADROOM is sized for the phone's 4bpp PNG, and nothing here
+    // checks bit depth: s_rx_total is the compressed size, so a deeper source
+    // passes both clauses even though it inflates to more (about 2x the frame
+    // at 8bpp). The NULL-pixel-buffer check and the load_image() restore
+    // behind it contain a decode that runs short.
     // The image being replaced is destroyed before the decode, so its bytes
-    // count as available here -- otherwise every refresh after the first
-    // would be refused.
+    // count as available; otherwise every refresh after the first would be
+    // refused.
     uint32_t avail = heap_bytes_free() + bitmap_bytes(s_image);
     if (s_rx_total == 0 || s_rx_total > FRAME_BYTES * 2 ||
         avail < s_rx_total + DECODE_HEADROOM) {
@@ -1261,10 +1138,10 @@ static void inbox_received_callback(DictionaryIterator *iter, void *ctx) {
 
   // ---- Finalize --------------------------------------------------------
   if (s_rx_len == s_rx_total) {
-    // Destroy the old bitmap BEFORE decoding: cuts peak heap by the
-    // FRAME_BYTES the resident frame holds (~23 KB on emery, ~12 KB on basalt),
-    // and those bytes were already counted as available in the guard above.
-    // Nothing is rendered between here and the layer_mark_dirty below.
+    // Destroy the old bitmap before decoding: it cuts peak heap by a whole
+    // FRAME_BYTES, and those bytes were already counted as available in the
+    // guard above. Nothing is rendered between here and the layer_mark_dirty
+    // below.
     if (s_image) {
       gbitmap_destroy(s_image);
       s_image = NULL;
@@ -1293,7 +1170,7 @@ static void inbox_received_callback(DictionaryIterator *iter, void *ctx) {
 
     // The old bitmap is gone by now, so a NULL decode would leave the layer
     // blank until the next tick. Ask once for a fresh copy; the flag keeps a
-    // failing image from re-requesting back-to-back at fetch pace. It does NOT
+    // failing image from re-requesting back-to-back at fetch pace. It does not
     // stop the retrying: the flag clears only on a successful decode, and the
     // heartbeat re-offers the composite anyway (a NULL s_image makes
     // tick_handler ask for one), so a permanently undecodable image is retried
@@ -1301,18 +1178,16 @@ static void inbox_received_callback(DictionaryIterator *iter, void *ctx) {
     if (s_image) {
       s_decode_retry = false;
     } else {
-      // The frame this transfer was replacing is already destroyed, but the
-      // cache still holds the last one that DID decode -- older, and different
-      // bytes from the ones that just failed, so restoring it is not a retry of
-      // the same failure. Grey is now the fallback's fallback. Attempted before
-      // the rate-limit arm and independently of it: that flag governs only the
-      // re-REQUEST, and a second consecutive failure destroys the restored
-      // frame too, so gating the restore on it would blank the face for good.
+      // The frame this transfer was replacing is gone, but the cache still
+      // holds the last one that did decode: older, different bytes, so
+      // restoring it is not a retry of the same failure. Attempted before and
+      // independently of the rate-limit flag, which governs only the
+      // re-request: a second consecutive failure destroys the restored frame
+      // too, so gating the restore on the flag would blank the face for good.
       load_image();
-      // Unconditionally on the failure path, restored or not: a restored frame
-      // is OLDER than the one that just failed, so the real bytes are still
-      // wanted. The flag rate-limits this to one re-request per run of
-      // failures, exactly as before.
+      // Re-request whether or not the restore worked: a restored frame is
+      // older than the one that failed. The flag limits this to one
+      // re-request per run of failures.
       if (!s_decode_retry) {
         APP_LOG(APP_LOG_LEVEL_ERROR, "Decode failed");
         s_decode_retry = true;
@@ -1337,9 +1212,9 @@ static void inbox_dropped_callback(AppMessageResult reason, void *context) {
   // keeps streaming the rest of a transfer we can no longer accept, and would
   // otherwise believe an image it never delivered had arrived.
   //
-  // MUST be true, not !s_image. AppMessage ACKs delivery, so the phone cannot
+  // Must be true, not !s_image. AppMessage ACKs delivery, so the phone cannot
   // see that we threw this transfer away -- it will complete the remaining
-  // chunks and COMMIT the composite's hash as ours. The previous composite is
+  // chunks and commit the composite's hash as ours. The previous composite is
   // usually still resident here, so !s_image would be false and the phone's
   // cache would then skip the re-send of an image we never assembled, until the
   // bbox happened to move. This and the phone's abort-clear are two halves of
@@ -1361,63 +1236,38 @@ static void outbox_failed_callback(DictionaryIterator *iterator,
 // ============================================================================
 
 // ---- Bluetooth badge -------------------------------------------------------
-// The firmware ships a CONNECTIVITY_BLUETOOTH_DISCONNECTED bitmap, but no app
-// can reach it: every app-facing resource entry point is scoped to the app's
-// own resource bank (PebbleOS applib_resource_get_handle(), and
-// gbitmap_create_with_resource() which passes sys_get_current_resource_num()),
-// and the one call that takes a bank number -- gbitmap_create_with_resource_
-// system() -- is absent from the SDK's exported_symbols.json. Fonts are the
-// only system asset handed to apps. It would not be the artwork below in any
-// case: that 25x25 asset (and its four CONNECTIVITY_BLUETOOTH_* siblings, all
-// of which share one glyph and differ only in the modifier beside it) draws a
-// *watch* pictogram with an X, not a slashed rune. Nothing in PebbleOS or the
-// SDK docs ships a slashed Bluetooth rune; the SDK's own watchface tutorial
-// uses a plain rune, visible only while disconnected.
+// The firmware's CONNECTIVITY_BLUETOOTH_* bitmaps are out of reach: app
+// resource calls are scoped to the app's own bank, and
+// gbitmap_create_with_resource_system() is not in the SDK's
+// exported_symbols.json. A bundled PNG would be applib_malloc'd (only system
+// apps mmap resources from flash) out of the heap the decode guard rations.
+// So the rune is drawn from line segments: zero heap, no resource, and it
+// takes the configured text/outline colors.
 //
-// Bundling our own PNG is the documented alternative and what the SDK tutorial
-// does, but an app-bank resource is always applib_malloc'd: mmap-from-flash is
-// attempted only for SYSTEM_APP (applib_resource_mmap_or_load), so the bitmap
-// would sit in the same heap the decode guard is rationing, which basalt
-// clears by ~19%. The rune is drawn from line segments instead -- zero heap,
-// no resource, and it picks up the configured text/outline colors for free.
-//
-// Deliberately a fixed pixel size rather than a fraction of the display. This
-// is a corner badge, not layout: it should read identically on every platform
-// instead of growing with the screen.
+// A fixed pixel size rather than a fraction of the display: a corner badge
+// should read the same on every platform.
 #define BT_HALF   6    // half-width of the rune's flags
 #define BT_HEIGHT 20   // top vertex to bottom vertex
 #define BT_INSET  3    // whole badge, slash overhang included, from the corner
-// Odd values ONLY. graphics_context_set_stroke_width() stores an even width as
-// given, but the drawing routines silently change it, so an even value never
-// draws the width it reads. Which direction is NOT what the SDK says: the doc
-// comment on that function (PebbleOS gcontext.h, and the identical text in the
-// SDK's pebble.h) claims an even width rounds "down to the previous integral
-// value", while the implementation rounds it UP -- prv_adjust_stroked_line_
-// width() in PebbleOS graphics_line.c is `if (*width % 2 == 0) (*width)++;`,
-// and graphics_draw_line() routes through it for any stroke_width > 1. Firmware
-// source over header docs, per the same rule the rest of this file follows: an
-// even value here would draw one px THICKER than it reads, not thinner.
-// 1/3 is also the only pair legible at this size: the flags are BT_HALF
-// px from the stem, and at a 3 px glyph with a 5 px halo they merge into a
-// solid blob. Enlarging the rune enough to carry a 3 px stroke would roughly
-// double the badge again, which is a lot of basalt's 144x168 to spend on a
-// corner indicator.
+// Odd values only. An even width is stored as given but drawn one px thicker:
+// prv_adjust_stroked_line_width() in PebbleOS graphics_line.c rounds it up,
+// although the gcontext.h doc says down. 1/3 is also the only legible pair at
+// this size: with a 3 px glyph and a 5 px halo the flags, BT_HALF px from the
+// stem, merge into a blob, and a rune large enough for that stroke would
+// spend too much of basalt's 144x168 on a corner indicator.
 #define BT_STROKE 1    // glyph; halo draws at BT_STROKE + 2 -> 1 px each side
 
-// ...which is why a thicker rune is built out of 1 px strokes rather than by
-// raising BT_STROKE: an extra copy of the polyline offset 1 px in x renders as
-// a true 2 px, the width the API cannot express. Offset in x because nothing in
-// the rune is horizontal -- the stem is vertical, the flags run at ~40 degrees
-// -- so every stroke gains width; an offset along either diagonal would leave
-// the flag pair parallel to it as thin as before. The copies are drawn inside
-// each pass, so the halo still completes before the first glyph pixel lands.
-//
-// Costs no footprint: the extra copy extends the rune to cx + BT_HALF + 1,
-// which is exactly the slash's right edge, so the badge box is unchanged.
+// A thicker rune is therefore built from 1 px strokes rather than by raising
+// BT_STROKE: a copy of the polyline offset 1 px in x renders as a true 2 px,
+// a width the API cannot express. Offset in x because nothing in the rune is
+// horizontal, so every stroke gains width; a diagonal offset would leave the
+// flags parallel to it as thin as before. The copies are drawn inside each
+// pass, so the halo completes before the first glyph pixel. The copy ends at
+// cx + BT_HALF + 1, the slash's right edge, so the badge box is unchanged.
 #define BT_RUNE_COPIES 2   // 1 = single stroke; 2 = effective 2 px
 
 // The slash. Its angle is not a style choice: the rune's four flag segments
-// already run at ~40 degrees in BOTH diagonal directions, so a 45-degree slash
+// already run at ~40 degrees in both diagonal directions, so a 45-degree slash
 // -- either way round -- lands parallel to two of them and reads as a fifth
 // flag rather than a strike-through. Only a markedly steeper line separates,
 // hence a half-width narrower than the rune's height is tall. It also has to
@@ -1427,30 +1277,23 @@ static void outbox_failed_callback(DictionaryIterator *iterator,
 #define BT_SLASH_HALF 7   // half-width; > BT_HALF, so it sets the badge width
 #define BT_SLASH_OVER 2   // overhang past the rune's top and bottom vertices
 
-// The slash's glyph pass ignores TextColor and draws red -- the same red as the
-// center marker's dot, the face's one existing "this is not chrome" color. Only
-// the glyph: the halo underneath stays OutlineColor, so the slash keeps the
-// contrast guarantee the rest of the badge has over arbitrary imagery, and it
-// stays separated from the rune even when TextColor is itself red.
-//
-// Hardcoded rather than a Clay picker: it marks a fault, and a fault indicator
-// the user can quietly recolor into the background is worse than no setting.
-// Both target platforms are color; a future b/w platform renders GColorRed as
-// black (GColor8 nearest-match), which is legible against the white halo but
-// loses the distinction from the rune -- revisit the slash there, not here.
+// The slash's glyph pass draws red, like the center marker's dot, whatever
+// TextColor is. Its halo stays OutlineColor, so the slash keeps the badge's
+// contrast over imagery and stays separated from the rune even when TextColor
+// is red. Hardcoded rather than a Clay picker: a fault indicator the user can
+// recolor into the background is worse than no setting. Every target
+// platform is color; a b/w platform would render GColorRed as black and lose
+// the distinction from the rune, so revisit the slash there.
 #define BT_SLASH_COLOR GColorRed
 
 // Two passes: the whole polyline in the outline color at a thicker stroke,
-// then the whole polyline in the text color. Same halo trick as the text pass,
-// and for the same reason -- the badge sits over arbitrary radar imagery. The
-// outline pass has to finish before the glyph pass starts, or a later outline
-// segment would paint over an earlier glyph segment at the crossings.
+// then in the text color, the same halo trick as the text pass because the
+// badge sits over arbitrary imagery. The outline pass must finish first, or a
+// later outline segment paints over an earlier glyph segment at a crossing.
 //
-// The slash then repeats both passes AFTER the rune is complete, which is what
-// makes it read as lying on top: its outline pass reprints the halo color over
-// the rune's glyph pixels, leaving a 1 px gap either side of the slash at every
-// crossing. Drawing it as a seventh point of the polyline instead would let the
-// two shapes' glyph strokes touch, and the slash would disappear into the rune.
+// The slash repeats both passes after the rune is complete, so its outline
+// cuts a 1 px gap in the rune either side of it. As a seventh polyline point
+// its glyph stroke would touch the rune's and vanish into it.
 static void draw_bt_badge(GContext *ctx, GRect bounds) {
   // Every point in the badge, from one origin: p is the rune as a single open
   // polyline, in draw order -- upper-left flag tip -> lower-right flag tip ->
@@ -1504,14 +1347,10 @@ static void draw_bt_badge(GContext *ctx, GRect bounds) {
 static void map_update_proc(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
 
-  // 1. Composite map — basemap and radar already blended by pkjs, so this is
-  // the only bitmap draw. Opaque, drawn as-served, no recoloring, at the
-  // default GCompOpAssign the context enters every update proc with.
-  //
-  // There is deliberately no compositing-mode set here any more. The old radar
-  // overlay pass set GCompOpSet and never restored it -- harmless only because
-  // steps 2-4 below draw no bitmaps. If a second bitmap draw is ever added to
-  // this proc, do not reintroduce a mode set without restoring it.
+  // 1. Composite map, basemap and radar already blended by pkjs: the only
+  // bitmap draw, at the default GCompOpAssign the context enters every update
+  // proc with. If another bitmap draw is added, restore any compositing mode
+  // it sets.
   if (s_image) {
     graphics_draw_bitmap_in_rect(ctx, s_image, bounds);
   } else {
@@ -1526,27 +1365,23 @@ static void map_update_proc(Layer *layer, GContext *ctx) {
   graphics_context_set_fill_color(ctx, GColorRed);
   graphics_fill_circle(ctx, c, 2);
 
-  // 3. Bluetooth badge — top-left, shown ONLY while the phone is unreachable.
-  // Visible-means-disconnected is the watchface convention (and what the SDK
-  // tutorial does); the slash is belt-and-braces on top of that, so the badge
-  // does not have to be read as "absence means fine". The firmware's own icons
-  // pair a glyph with a separate X instead, but those are drawn against a
-  // cleared status bar, where a second symbol has room; here it is one glyph
-  // over live imagery.
-  // Peeked rather than cached: connection_callback() dirties this layer, so a
-  // render can only ever follow the state it is about to draw. Drawn BEFORE
-  // the text pass so an overlapping line wins the corner.
+  // 3. Bluetooth badge, top-left, shown only while the phone is unreachable
+  // (the watchface convention). The slash makes it read as "disconnected" on
+  // its own, without relying on that convention. Peeked rather than cached:
+  // connection_callback() dirties this layer, so a render always follows the
+  // state it draws. Drawn before the text pass so an overlapping line wins the
+  // corner.
   if (s_settings.bt_badge && !connection_service_peek_pebble_app_connection()) {
     draw_bt_badge(ctx, bounds);
   }
 
   // 4. Text halo — each occupied line drawn 8x at ±1 px offsets in the
-  // outline color, UNDERNEATH the TextLayers (added after this layer, and
+  // outline color, underneath the TextLayers (added after this layer, and
   // sibling render order is add order), which keep drawing the glyphs in the
   // text color untouched. Geometry is the TextLayer's own frame and the text
   // is the same buffer the TextLayer points at, so this pass cannot disagree
   // with place_slot()/update_slots(). No sync hooks are needed either: the
-  // firmware render walk repaints the ENTIRE layer tree whenever any layer is
+  // firmware render walk repaints the entire layer tree whenever any layer is
   // dirtied (PebbleOS src/fw/applib/ui/layer.c — the traversal has no
   // per-layer dirty check), so text_layer_set_text() repaints the halo in the
   // same pass. The draw box mirrors the frame 1:1 because this layer fills
@@ -1594,7 +1429,7 @@ static void main_window_load(Window *window) {
     text_layer_set_text_color(s_slot_layers[i],
                               (GColor){ .argb = s_settings.text_argb });
     // Bind the buffer once, here: update_slots() only calls set_text when a
-    // string CHANGES, so a slot whose string is "" from boot would otherwise
+    // string changes, so a slot whose string is "" from boot would otherwise
     // keep text == NULL. main_window_unload() clears s_slot_layers[] but not
     // s_slot_bufs, so on a window reload every unchanged slot would come back
     // permanently blank. Done before the layers are added to the window, while
@@ -1631,7 +1466,7 @@ static void load_settings(void) {
   s_settings = (Settings){
     .version      = SETTINGS_VERSION,
     // Display order. Top Line 1 and Bottom Line 2 default to None, so the
-    // out-of-the-box face is the original two lines: Time over Date.
+    // out-of-the-box face is two lines: Time over Date.
     .slots        = { SLOT_NONE, 0, 1, SLOT_NONE },
     // Medium (Gothic 24 Bold), Extra Large (Bitham 30 Black),
     // Large (Gothic 28 Bold), Medium.
@@ -1642,14 +1477,10 @@ static void load_settings(void) {
     .bt_badge     = 1,
   };
 
-  // Versioned, all-or-nothing: the stored blob is taken only if it is exactly
-  // this struct's size AND carries this build's version. An older layout, a
-  // truncated write or flash corruption all land in the same branch -- do
-  // nothing, and keep the defaults above. There is no per-field migration and
-  // no partial acceptance, which is the whole point of the version byte.
-  //
-  // Read into a scratch copy rather than over s_settings: a rejected blob must
-  // not be able to leave the live settings half-overwritten.
+  // Take the stored blob only if it is exactly this struct's size and carries
+  // this build's version; an older layout, a truncated write or corruption all
+  // keep the defaults above. Read into a scratch copy so a rejected blob cannot
+  // leave the live settings half-overwritten.
   Settings stored;
   int read = persist_read_data(SETTINGS_KEY, &stored, sizeof(stored));
   if (read == (int)sizeof(Settings) && stored.version == SETTINGS_VERSION) {
@@ -1680,18 +1511,18 @@ static void init(void) {
     .did_change = unobstructed_did_change
   }, NULL);
 
-  // Register AppMessage callbacks BEFORE opening
+  // Register AppMessage callbacks before opening
   app_message_register_inbox_received(inbox_received_callback);
   app_message_register_inbox_dropped(inbox_dropped_callback);
   app_message_register_outbox_failed(outbox_failed_callback);
 
   app_message_open(app_message_inbox_size_maximum(), 64);  // outbox: one small int
 
-  // AFTER app_message_open, deliberately: the 8,200 B inbox is a permanent
+  // After app_message_open, deliberately: the 8,200 B inbox is a permanent
   // allocation, and a decode that fitted only because the inbox had not been
   // claimed yet would trade a grey frame for a dead AppMessage channel.
   // Nothing has rendered at this point -- the window is pushed but the render
-  // walk runs from the event loop -- so the FIRST frame painted already carries
+  // walk runs from the event loop -- so the first frame painted already carries
   // the map, which is the whole point of the cache.
   if (load_image()) {
     update_slots();   // Radar Age adopts the restored frame's own stamp

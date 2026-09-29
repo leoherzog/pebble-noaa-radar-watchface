@@ -1,30 +1,26 @@
 #!/usr/bin/env bash
 # Capture one gallery tile: capture.sh <platform> <scenario-id>
 #
-# Everything the emulator touches happens inside this ONE script invocation --
-# emulator state lives in /tmp/pb-emulator.json and is validated by pid, so a
-# `screenshot` issued from a different shell will not find an emulator this
-# shell launched and will try to boot a second one.
+# The whole emulator sequence runs inside this one invocation: emulator state
+# lives in /tmp/pb-emulator.json and is validated by pid, so a command from
+# another shell will not find this emulator and will boot a second one.
 #
-# Every pebble command that touches the emulator passes --vnc. Without a
-# display QEMU dies on "Could not initialize SDL"; worse, a flagless command
-# against a running VNC emulator SIGKILLs it and spawns a doomed replacement,
-# which looks like a crash rather than a state mismatch.
+# Every emulator command passes --vnc. Without a display QEMU dies on "Could
+# not initialize SDL", and a flagless command against a running VNC emulator
+# SIGKILLs it and spawns a replacement that dies the same way.
 #
-# NOTE on pkill: the pattern below is bracketed so it cannot match itself, but
-# that only holds because this file is driven as `bash capture.sh ...` -- the
-# invoking command line contains no occurrence of the target string. Never
-# inline these commands into a compound shell command that mentions qemu.
+# The pkill patterns are bracketed so they cannot match themselves, which holds
+# only while this file runs as `bash capture.sh ...`. Never inline these
+# commands into a compound shell command that mentions qemu.
 set -uo pipefail
 
 PLATFORM="${1:?platform}"
 SID="${2:?scenario id}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ="$(cd "$HERE/../.." && pwd)"
-# GALLERY_DIR overrides where tiles land. The default writes straight over the
-# committed tile, so a before/after comparison MUST redirect one of the two
-# passes -- otherwise the diff compares a tile against itself and reports zero
-# differences no matter what changed.
+# GALLERY_DIR overrides where tiles land. The default overwrites the committed
+# tile, so a before/after comparison must redirect one pass or it diffs each
+# tile against itself and always reports zero.
 OUTDIR="${GALLERY_DIR:-$PROJ/screenshots/gallery}/$PLATFORM"
 LOGDIR="${TMPDIR:-/tmp}/pebble-gallery-logs"
 mkdir -p "$OUTDIR" "$LOGDIR"
@@ -37,7 +33,7 @@ SDKARG=()
 
 # One parse of scenarios.json for the three static fields. Safe to split on
 # whitespace: slugs are hyphenated with no spaces, fmt is 12h/24h, battery is an
-# int. The 'clock' field is deliberately NOT read here -- see the block below.
+# int. The 'clock' field is deliberately not read here; see the block below.
 read -r SLUG FMT BATT < <(python3 -c "
 import json
 s=[x for x in json.load(open('$HERE/scenarios.json')) if x['id']==$SID][0]
@@ -56,7 +52,7 @@ cleanup() {
 cleanup
 python3 "$HERE/seed.py" "$PLATFORM" "$SID" || exit 1
 
-# First install boots the emulator. Wrap ONLY this one in a timeout: boot
+# First install boots the emulator. Wrap only this one in a timeout: boot
 # occasionally half-fails (qemu alive, pypkjs dead, state file never written)
 # and `pebble install` then waits forever. Children inherit the env.
 echo "[$PLATFORM/$SLUG] booting..."
@@ -69,9 +65,9 @@ if [ $? -ne 0 ]; then
     echo "[$PLATFORM/$SLUG] BOOT FAILED"; cleanup; exit 1; }
 fi
 
-# These two DO work against a running --vnc emulator, but they need the flags
-# spelled out or they try to launch a second emulator, print "Emulator launch
-# timed out" and exit 1 -- leaving the setting unapplied and the tile silently
+# These two work against a running --vnc emulator only with the flags spelled
+# out; otherwise they try to launch a second emulator, print "Emulator launch
+# timed out" and exit 1, leaving the setting unapplied and the tile silently
 # wrong. The exit status is honest here, so it is checked.
 pebble emu-time-format --emulator "$PLATFORM" --vnc "${SDKARG[@]}" --format "$FMT" >/dev/null 2>&1 \
   || { echo "[$PLATFORM/$SLUG] emu-time-format FAILED"; cleanup; exit 1; }
@@ -79,19 +75,17 @@ pebble emu-battery --emulator "$PLATFORM" --vnc "${SDKARG[@]}" --percent "$BATT"
   || { echo "[$PLATFORM/$SLUG] emu-battery FAILED"; cleanup; exit 1; }
 
 
-# Attach logs, then install a SECOND time. The first install's
+# Attach logs, then install a second time. The first install's
 # fetch->transfer->decode outruns the log attach, so the marker would be
-# missed; the relaunch replays the whole lifecycle with logs attached, and the
-# relaunched watch has a NULL bitmap so it forces the transfer past the hash
-# cache. The basemap now comes from the localstorage cache the first run wrote.
+# missed; the relaunch replays the lifecycle with logs attached, and the pkjs
+# `ready` handler forces a send past the hash cache. The basemap comes from
+# the localstorage cache the first run wrote.
 : > "$LOG"
 pebble logs --emulator "$PLATFORM" --vnc "${SDKARG[@]}" >>"$LOG" 2>&1 &
 LOGPID=$!
 sleep 3
 pebble install --emulator "$PLATFORM" --vnc "${SDKARG[@]}" >/dev/null 2>&1
 
-# Poll for the decode. The per-layer 'Decoded image 0/1' markers no longer
-# exist -- the phone composites, so there is one 'Decoded composite' line.
 DEADLINE=$((SECONDS + 240))
 DECODED=0
 while [ $SECONDS -lt $DEADLINE ]; do
@@ -109,14 +103,16 @@ fi
 
 sleep 4        # let the frame paint and the text slots settle
 
-# Watch clock, applied LAST. Only the WATCH moves -- the phone keeps real time,
+# Watch clock, applied last. Only the watch moves; the phone keeps real time,
 # so nothing here touches TLS validity or the pkjs 2 h observation gate.
 # It has to come after the final `pebble install`, which resyncs the emulated
 # RTC from the host and silently discards an earlier emu-set-time (exit status
 # stays 0, so the tile just comes out at wall-clock time).
-# Backwards is the safe direction: fmt_wx() blanks a payload to "--" once
-# watch_now - WX_TIME exceeds 3 h, which a past clock can never trigger, and a
-# past clock also leaves alert expiries in the future.
+# Backwards is the safe direction for weather: fmt_wx() blanks a payload to
+# "--" once watch_now - WX_TIME exceeds 3 h, which a past clock never triggers,
+# and alert expiries stay in the future. Sun slots are the exception: a span
+# starting after the watch's tomorrow renders as a date, so a scenario showing
+# one needs its clock on the capture date.
 CLOCK=$(python3 -c "
 import json, time
 s=[x for x in json.load(open('$HERE/scenarios.json')) if x['id']==$SID][0]

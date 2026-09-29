@@ -4,7 +4,8 @@
 The banner background can't come from a watch screenshot -- a 200x228 frame
 blown up 4x is mush, and the watch's own text comes up with it. This asks the
 same two services the phone asks, at banner size, for one of the archived radar
-frames in scenarios.json. Same Web Mercator math as index.js:1298-1305.
+frames in scenarios.json. Same Web Mercator math as locationSuccess() in
+index.js.
 
 Full colour, not the 16-colour composite: it's a decorative wash sitting behind
 type, not a claim about what the watch renders.

@@ -3,78 +3,57 @@
  * one pin object Pebble.insertTimelinePin() accepts, and decide which pins are
  * worth inserting this heartbeat.
  *
- * Everything here is pure arithmetic and string work over the caller's objects:
- * no Pebble APIs, no XHR, no localStorage, no module-level state, no Date.now()
- * (`nowSec` is always a parameter, which is what lets a node harness pin the
- * clock and get byte-identical output). A node harness may require this file
- * freely and call anything in it. Delivery lives in index.js, which owns every
- * `Pebble.*` call in the phone process.
- *
- * Strict ES5 (var, function, no Map/Set, no Object statics, no arrow
- * functions): this ships through the pkjs bundler alongside index.js, whose
- * runtime predates all of them.
- *
- * index.js owns every log line in the phone process, so nothing here logs; a
- * QEMU grep for `TL ` then has exactly one owner.
+ * Pure and node-requirable: no Pebble APIs, XHR, localStorage, logging or
+ * module-level state, and `nowSec` is always a parameter so a harness can pin
+ * the clock. index.js owns delivery and every `TL` log line. Strict ES5 (no
+ * Map/Set, Object statics or arrow functions), because it ships alongside
+ * index.js to the same legacy pkjs runtime.
  */
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-// Runaway guard on work done in one tick, not a rate-limit budget: local pins
-// go straight to the phone, so there is no service and no request limit to
-// spend. A point query returns 0-1 alerts and whole states carried 0-7 distinct
-// pins at an instant, so this has never been the binding constraint. Overflow
-// is simply left for the next heartbeat: nothing is lost, because planPins
+// Runaway guard on inserts per alert fetch, not a rate limit: local pins have
+// no service quota. Overflow waits for the next fetch, because planPins
 // re-derives the same candidates from persisted state.
 var MAX_PUTS_PER_FETCH = 8;
 
-// The timeline WEB API rejected a `time` more than 2 days past or 1 year
-// future (sdk-docs timeline-public.md). That route is deliberately unused here
-// (see index.js), and no equivalent bound is documented for local pins, so this
-// is kept as a conservative clamp rather than a known limit — the floor sits an
-// hour inside it. What makes it live code is measured, not inherited: the live
-// active feed never exceeded 14.4 h of onset age, but 17.7% of the 7-day
-// archive does.
+// A conservative clamp, not a known limit: the timeline web API may reject a
+// `time` more than 2 days past or 1 year ahead (sdk-docs timeline-public.md),
+// and no bound is documented for local pins. The floor sits an hour inside.
+// Once a pin's anchor is more than 47 h old it re-clamps on every fetch, so
+// the pin's time walks forward with its end fixed and it is re-inserted each
+// time. That is current behaviour, not a dedupe bug.
 var PIN_TIME_FLOOR_SEC = 47 * 3600;
 var PIN_TIME_CEIL_SEC  = 300 * 86400;
 
-// The wire field is a uint16 of MINUTES. Out of range does not clamp anywhere
-// downstream: libpebble2 raises struct.error, pypkjs turns that into
-// item.rejected, and the log line goes to /dev/null unless the run was -vv —
-// i.e. the pin just never appears. Max observed hazard is 9,458 min, so the
-// ceiling is non-binding today and costs one call to be safe forever.
+// `duration` is a uint16 of minutes and nothing downstream clamps it: an
+// out-of-range value is rejected silently (libpebble2 struct.error, pypkjs
+// item.rejected) and the pin never appears.
 var MAX_DURATION_MIN = 65535;
 
 // Matches the firmware's PIN_DB_MAX_AGE (pin_db.c:26,222): once the watch has
 // auto-deleted a pin, our record of having sent it means nothing, and a fresh
-// PUT for the same id is correctly a fresh creation.
+// insert for the same id is correctly a fresh creation.
 var GC_AGE_SEC = 3 * 86400;
 
-// Purely a runaway guard — a point query yields 0-1 alerts, so this cannot bite
-// in normal operation. It exists because tl_pins shares a localStorage with two
-// base64 PNGs, where a quota throw is swallowed by the writer and silently
-// leaves stale data behind.
+// Runaway guard: tl_pins shares localStorage with two base64 PNGs, where a
+// quota throw is swallowed and silently leaves stale data behind. Above the
+// cap, ids beyond the 64 soonest-ending are never pinned.
 var MAX_STATE_ENTRIES = 64;
 
-// The firmware and emulator cut title/subtitle at 63 BYTES and body at 511, so
-// these caps are BYTES too and clip() counts them as such. They were char
-// counts first, which is the same number for every NWS product measured (0 of
-// 6,000 corpus messages and 0 of 34 Puerto Rico ones carried a non-ASCII byte;
-// every one is language en-US) — but the guarantee that the serializer never
-// re-cuts, and therefore can never split a UTF-8 sequence, is the whole reason
-// the caps exist, and a char count does not deliver it for a product NWS has
-// not yet shipped. 60 chars of emoji measured 140 bytes against a 63-byte cut.
+// Byte caps, counted by clip(), under the firmware's 63-byte title/subtitle
+// and 511-byte body cuts: staying under them means the serializer never
+// re-cuts, so it can never split a UTF-8 sequence. A char count would not
+// guarantee that.
 var BODY_MAX     = 500;
 var TITLE_MAX    = 60;
 var SUBTITLE_MAX = 40;
 
-// Date's own representable range (±8.64e15 ms), in seconds. Anything outside it
-// makes toISOString throw RangeError, which would break this module's "never
-// throws for any input" contract from a caller's bad clock rather than from bad
-// NWS data. index.js always passes Math.floor(Date.now()/1000), so this is a
-// contract guard, not a live path.
+// Date's representable range (±8.64e15 ms), in seconds. Outside it
+// toISOString throws RangeError, which would break this module's never-throws
+// contract.
 var MAX_EPOCH_SEC = 8.64e12;
 
 // ---------------------------------------------------------------------------
@@ -85,11 +64,9 @@ var MAX_EPOCH_SEC = 8.64e12;
 // (16777619 === 2^24+2^8+2^7+2^4+2^1+2^0), written out because Math.imul is not
 // guaranteed on this runtime.
 //
-// composite.hashBytes is deliberately NOT reused: measured, given a JS string it
-// degenerates to a length-only hash — two distinct 26-char urn:oid strings both
-// produced '1a:47083d3f' — because it does `h ^= b[i]` and a one-character
-// string coerces to NaN. Every same-length alert would collapse onto one
-// signature and no update would ever be pushed.
+// Do not reuse composite.hashBytes on a string: `h ^= b[i]` coerces each
+// character to a number, so every non-digit XORs in as 0 and same-length
+// strings that differ only in letters collide on one signature.
 function strHash(s) {
   var t = (s === null || s === undefined) ? '' : String(s);
   var h = 2166136261;
@@ -100,9 +77,7 @@ function strHash(s) {
   return ('0000000' + h.toString(16)).slice(-8);
 }
 
-// Local copy of index.js's parseEpoch, because this module imports nothing. NWS
-// stamps are ISO 8601 with numeric offsets, never 'Z' (7 distinct offsets
-// observed); Date.parse handles them, which index.js already relies on.
+// Local copy of index.js's parseEpoch, because this module imports nothing.
 function parseEpochSec(s) {
   if (!s) return 0;
   var ms = Date.parse(s);
@@ -123,24 +98,18 @@ function isoOf(sec) {
   return new Date(sec * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
-// NWS hard-wraps `description` with real newlines mid-sentence, so slicing it
-// raw produces broken line breaks and wastes the 512-char budget. The String()
-// coercion is load-bearing too: description is null on 4 of 6,050 corpus
-// alerts, one of them a Special Marine Warning that passes the severity filter.
+// NWS hard-wraps `description` mid-sentence, so raw text wastes the body cap on
+// line breaks. The `|| ''` matters: `description` can be null, even on alerts
+// that pass the severity filter.
 function collapse(s) {
   return String(s || '').replace(/\s+/g, ' ').trim();
 }
 
-// Clips to n UTF-8 BYTES, never mid-sequence and never between the halves of a
-// surrogate pair — for ASCII, which is all NWS has ever emitted, this is
-// byte-for-byte the old character slice. The pair handling is deliberately
-// crude and only correct for well-formed input: a high surrogate is taken as
-// the start of a pair on the strength of a following character alone, without
-// checking it is a low surrogate. So a high surrogate at the very END of the
-// string is dropped (it cannot be encoded), but one followed by anything else
-// is passed through and billed 4 bytes. Unreachable for NWS — 0 of 6,050 corpus
-// messages carried a non-ASCII byte — and tightening the test is the fix if a
-// non-ASCII source ever appears here.
+// Clips to n UTF-8 bytes, never mid-sequence or between surrogate halves.
+// Correct only for well-formed input: a high surrogate followed by any
+// character is billed as a 4-byte pair without checking the second half, and
+// one at the very end is dropped. Tighten that test if a non-ASCII source ever
+// reaches this module.
 function clip(s, n) {
   var t = String(s === null || s === undefined ? '' : s);
   var bytes = 0, i, c, w;
@@ -164,47 +133,32 @@ function clip(s, n) {
 // The severity filter
 // ---------------------------------------------------------------------------
 
-// Two clauses, and exactly two. Measured over a 6,050-message corpus (7 days of
-// status=actual, the API's full archive retention) this is SET-IDENTICAL to the
-// longer rule that also excludes messageType 'Cancel' and VTEC actions CAN/UPG:
-// 3,177 of 6,050 messages, 1,170 distinct pins nationwide over 7 days.
-//
-// Applied in exactly one place — inside buildPin — so planPins cannot drift
-// from it.
+// Two clauses on purpose: over a 7-day corpus they admit exactly the same set
+// as the longer rule that also excludes messageType 'Cancel' and VTEC CAN/UPG.
+// planPins filters only through buildPin, so it cannot drift from this rule.
 function isSevere(props) {
   if (!props) return false;
-  // severity, not the event name. `Gale Warning` is Moderate/Minor, so the
-  // "endswith Warning" shortcut is false in general -- and it is redundant
-  // anyway: filtering on severity alone returned the identical set (3,179 of
-  // 5,288 non-Cancel messages) as filtering on severity AND Warning-or-Watch.
-  // Severity is also self-maintaining across seasons: Winter Storm Warning
-  // could not be sampled in August (7-day archive retention), and an
-  // event-name allowlist would have needed its winter rows guessed.
+  // Severity, not event name. Adding a Warning-or-Watch test changes nothing,
+  // and "ends with Warning" alone would admit Gale Warning (Moderate/Minor).
+  // Severity also covers seasons never sampled, where an event-name allowlist
+  // would need its winter rows guessed.
   if (props.severity !== 'Extreme' && props.severity !== 'Severe') return false;
-  // Cancellations and upgrades LEAK into /alerts/active as messageType
-  // 'Alert' with severity 'Severe' -- three were live in a single snapshot,
-  // e.g. a Fire Weather Watch whose headline reads "has been replaced".
-  // A severity-only filter pins those as live warnings. urgency Past filters
-  // them exactly: every CAN/UPG message in the corpus carries it and nothing
-  // else ever does, and it wrongly drops zero non-terminal severe alerts.
-  // (The set claim is the load-bearing part and is what was tested. The count
-  // was recorded twice from the same 6,050-message sweep and disagrees with
-  // itself -- 766 here, 740 in CLAUDE.md -- and the 7-day archive retention
-  // means the corpus is gone, so neither figure is quoted as fact any more.)
+  // Cancellations and upgrades reach /alerts/active as messageType 'Alert'
+  // with severity Severe (a headline reading "has been replaced"), and a
+  // severity-only filter would pin them as live. urgency Past excludes exactly
+  // those: every CAN/UPG message in the corpus carried it and nothing else did.
   return props.urgency !== 'Past';
 }
 
-// Deliberately absent, each measured rather than assumed:
-//   messageType !== 'Cancel'  — redundant, and Cancel never appears in
-//     /alerts/active at all (0/367 live, 0/36 archived Cancels present), so the
+// Deliberately absent:
+//   messageType !== 'Cancel': Cancel never appears in /alerts/active, so the
 //     clause would never fire yet would look correct in review.
-//   VTEC action not in {CAN,UPG} — redundant, and it would force the VTEC parse
-//     to run before the filter, coupling two independent decisions.
-//   VTEC action !== 'EXP' — WRONG. EXP means expiring naturally, not cancelled;
-//     it would drop 451 severe messages including in-force Tornado Warnings in
-//     their final minutes. EXP urgency is Immediate/Expected/Future, never Past,
-//     so the rule above correctly keeps them.
-//   any `certainty` clause — unmeasured, and severity already encodes the tier.
+//   VTEC action not in {CAN,UPG}: redundant, and it would couple the filter to
+//     the VTEC parse.
+//   VTEC action !== 'EXP': wrong. EXP means expiring naturally, and it would
+//     drop in-force Tornado Warnings in their final minutes. EXP urgency is
+//     never Past, so the rule above keeps them.
+//   any `certainty` clause: unmeasured, and severity already encodes the tier.
 
 // ---------------------------------------------------------------------------
 // Pin identity
@@ -228,21 +182,16 @@ function vtecOf(props) {
            beginYY: m[5], endYY: m[6] };
 }
 
-// The alert's own `id` is not usable twice over: it is 69 chars on all 6,050
-// sampled (the limit is 64), and it CHANGES on every reissue — hashing it would
-// mint a fresh pin per heartbeat, up to 19 duplicate pins for one warning, each
-// persisting 3 days with no recovery path. The VTEC event key is the stable
-// identity: measured unchanged across all 162 reference-linked message pairs,
-// and present on 100% of severity-filtered alerts (3,177/3,177).
+// Not the alert's own `id`: it is 69 chars against the 64-char pin id cap, and
+// it changes on every reissue, so hashing it would mint a duplicate pin per
+// reissue, each persisting 3 days. The VTEC event key is stable across a
+// reissue chain.
 //
-// The year is worth its 5 chars because the ETN recycles annually and a DELETEd
-// pin id can never be reused — an id collision a year later would make a real
-// alert un-pinnable. It comes from the VTEC END time because the BEGIN time is
-// literally 000000T0000Z on every CON/EXT reissue, so a begin-derived year would
-// be unstable along the chain. nowSec is the last resort only.
-//
-// Accepted edge: an event EXTended across a New Year boundary mints one extra
-// pin. Once a year at worst, and no id is burned because nothing is DELETEd.
+// The year is there because ETNs recycle annually and a DELETEd pin id can
+// never be reused. It comes from the VTEC end time, since the begin time is
+// 000000T0000Z on every CON/EXT reissue; nowSec is the last resort. An event
+// EXTended across New Year mints one extra pin; that is accepted, and burns no
+// id because nothing is DELETEd.
 function pinIdFor(props, nowSec) {
   var v = vtecOf(props);
   if (!v) return null;
@@ -253,22 +202,20 @@ function pinIdFor(props, nowSec) {
   return 'wx.20' + yy + '.' + v.office + '.' + v.phenom + '.' + v.sig + '.' + v.etn;
 }
 
-// A feature whose VTEC key does not parse is skipped entirely, with no fallback
-// id. Every available fallback (a hash of `id`, of event+areaDesc+ends) is
-// unstable across reissues and would mint duplicates that live 3 days with no
-// recovery path, because we never DELETE. It measured 0/3,177 on the severe
-// filter set, so the path would be untested as well as harmful when it fired.
-// A missing pin degrades to exactly today's behaviour; a pin flood does not.
+// A feature whose VTEC key does not parse is skipped, with no fallback id.
+// Every fallback (a hash of `id`, of event+areaDesc+ends) is unstable across
+// reissues and would mint duplicates that live 3 days, because nothing is ever
+// DELETEd. A missing pin is harmless; a pin flood is not.
 
 // ---------------------------------------------------------------------------
 // Pin content
 // ---------------------------------------------------------------------------
 
-// The structured sections are present on ~60% of severe alerts (1,891/3,177)
-// and run ~60-100 chars combined — "60 mph wind gusts. Expect damage to roofs,
-// siding, and trees." — which beats the raw text badly, since 21.4% of severe
-// alerts exceed the 512-char body limit outright. The lookahead ends a section
-// at the next ALLCAPS...  label or at end of string.
+// The HAZARD.../IMPACT... sections, when present, make a short body where the
+// raw description often overruns the body cap. The lookahead ends a section at
+// the next ALLCAPS... label or at end of string. No /g flag: a module-level /g
+// regex keeps lastIndex between calls, which would make bodyFor, and so
+// pinSig, depend on call order.
 var HAZARD_RE = /HAZARD\.\.\.(.*?)(?=[A-Z]{4,}\.\.\.|$)/;
 var IMPACT_RE = /IMPACT\.\.\.(.*?)(?=[A-Z]{4,}\.\.\.|$)/;
 
@@ -282,10 +229,9 @@ function bodyFor(props) {
   return clip(parts.length ? parts.join(' ') : d, BODY_MAX);
 }
 
-// All three resource ids are documented and were resolved in the emulator's own
-// layouts.json (GENERIC_WARNING=28, HEAVY_RAIN=52, HEAVY_SNOW=53). There is no
-// tornado or lightning icon: do NOT invent a resource id, an unknown one
-// KeyErrors at serialise time in pypkjs and is refused by the firmware.
+// Only documented system icons. There is no tornado or lightning icon, and an
+// invented resource id is refused (pypkjs KeyErrors at serialise time, the
+// firmware rejects it).
 function iconFor(title) {
   if (/Flood|Rain|Hurricane|Tropical|Marine/.test(title)) {
     return 'system://images/HEAVY_RAIN';
@@ -296,39 +242,32 @@ function iconFor(title) {
   return 'system://images/GENERIC_WARNING';
 }
 
-// anchorSec is the caller's persisted first-seen onset for this pin id (0 when
-// none is recorded yet). It exists because `onset` drifts FORWARD on 96% of
-// multi-message VTEC chains — a CON/EXT reissue carries VTEC start 000000T0000Z
-// and the API stamps onset with the send time — so reading onset fresh each
-// heartbeat makes the pin's start walk forward every 10 minutes and jump in the
-// user's timeline. Silently, since every PUT succeeds.
+// Returns {id, pin, time, endSec}, or null (not severe, no VTEC key, or an
+// unusable nowSec). anchorSec is the caller's persisted first-seen onset for
+// this id, 0 if none: `onset` drifts forward on reissues (the API stamps a
+// CON/EXT with its send time), so reading it fresh would walk the pin's start
+// forward every heartbeat, silently.
 //
 // Key insertion order is part of the contract: pinSig hashes
-// JSON.stringify(pin), so reordering these assignments re-PUTs every live pin.
+// JSON.stringify(pin), so reordering these assignments re-inserts every live
+// pin.
 function buildPin(props, anchorSec, nowSec) {
   if (!isSevere(props)) return null;
-  // A nowSec Date cannot represent (NaN, undefined, 1e18) would make isoOf
-  // throw RangeError out of a function documented never to throw. No pin is
-  // better than a pin dated off a clock that is not a clock; the comparison
-  // form is deliberate, since every relational test against NaN is false.
+  // An unrepresentable nowSec would make isoOf throw RangeError; no pin beats
+  // one dated off a broken clock.
   if (!sane(nowSec)) return null;
   var id = pinIdFor(props, nowSec);
   if (!id) return null;
 
-  // End FIRST, and from `ends` before `expires` — the OPPOSITE preference from
-  // index.js's `ex`, which is right for its own question ("when does this watch
-  // STRING go stale") and wrong here. `expires` is the product RESEND deadline,
-  // not the hazard end: expires-onset is <= 0 for 4.6% of non-Cancel messages,
-  // worst case -5,430 minutes (an Extreme Heat Watch whose expires falls 4 days
-  // before its onset). The || fallback is live code, not decoration: `ends` is
-  // null 16.9% of the time, including 15 Flood Warnings and 10 Hurricane
-  // Watches that pass the severity filter.
+  // `ends` before `expires`, the opposite of index.js's `ex`, which is right
+  // for when a watch string goes stale and wrong here: `expires` is the
+  // product resend deadline, not the hazard end, and can fall days before
+  // onset. The fallback is live: `ends` is often null, even on severe alerts.
   var endsSec = parseEpochSec(props.ends);
   var endSec = endsSec || parseEpochSec(props.expires);
 
-  // onset measured never-null across all 6,050 corpus alerts; the chain costs
-  // nothing and covers the status:Test shape (null onset) if &status=actual is
-  // ever lost.
+  // Covers a null onset, as on status Test alerts if &status=actual is ever
+  // dropped from the query.
   var onsetSec = parseEpochSec(props.onset) || parseEpochSec(props.effective) ||
                  parseEpochSec(props.sent) || nowSec;
 
@@ -341,43 +280,28 @@ function buildPin(props, anchorSec, nowSec) {
   // the end (event.c:214 timeline_event_is_ongoing, timeline.c:431
   // prv_prune_ordered_timeline_list), so holding the end fixed is exactly what
   // makes the pin stop reading as current at expiry, watch-side and offline.
-  // The floor matters: 2.3% of messages compute <= 0 even with (ends||expires).
   var mins = endSec ? Math.round((endSec - timeSec) / 60) : 1;
-  // A non-positive span from a `ends`-less alert is not a hazard that is over,
-  // it is the RESEND deadline being read as one: measured across the corpus at
-  // each message's own send time, 118 of 3,165 pins computed <= 1 minute, and
-  // the two that were NOT already-expiring VTEC EXP messages were brand-new
-  // watches for TOMORROW whose `expires` fell before their own onset. A
-  // 1-minute pin lands at the right time and then stops reading as current one
-  // minute later (event.c:214 timeline_event_is_ongoing), i.e. never shows for
-  // the hazard it describes. An hour is the honest floor for "end unknown"; a
-  // real EXP still gets its short pin, because those carry `ends`.
+  // With no `ends`, a non-positive span means the resend deadline fell before
+  // the time, not that the hazard is over (a new watch for tomorrow can do
+  // this). A 1-minute pin would stop reading as current at once, so use an
+  // hour; an expiring alert that carries `ends` keeps its short pin.
   if (mins < 1 && !endsSec) mins = 60;
   var duration = Math.max(1, Math.min(MAX_DURATION_MIN, mins));
 
-  // `event` is 11-32 chars and never null, so it needs no abbreviation — and
-  // must never be run through index.js's fitWx/budgetFor, which exist to fit
-  // the watch's four text slots against a pixel budget and would cut a pin
-  // title to 25 characters.
+  // Never run pin text through index.js's fitWx/budgetFor: they fit the watch's
+  // text slots and would cut a pin title to 25 characters.
   var title = clip(String(props.event || 'Weather Alert'), TITLE_MAX);
-  // areaDesc reaches 1,174 chars on area-wide queries. A point query returns
-  // one segment, so the split is the safety net rather than the normal path.
+  // areaDesc lists every zone in the segment, ';'-separated, even on a point
+  // query, so the subtitle takes the first.
   var area = clip(collapse(props.areaDesc).split(';')[0], SUBTITLE_MAX);
   var body = bodyFor(props);
 
-  // genericPin, always. NEVER weatherPin: it requires `locationName` and its
-  // subtitle supports only numbers and the degree symbol (pin-structure.md:
-  // 624-626). This exact combination — GENERIC_WARNING + title + subtitle +
-  // body — was rendered on emery and read back off a screenshot, so it is
-  // known to display.
+  // genericPin, never weatherPin: that requires `locationName` and its subtitle
+  // takes only numbers and the degree symbol (pin-structure.md:624-626).
   //
-  // No color fields. Local pins ignore primaryColor/secondaryColor/
-  // backgroundColor outright, so a severity color would be dead weight on the
-  // only route that ships. Note the emulator DISAGREES here: `pebble
-  // insert-pin` injects over the SDK's own websocket rather than through the
-  // phone's local-pin path, and it does honour backgroundColor — an earlier
-  // screenshot showed the severity color rendering. That screenshot was not
-  // evidence about real hardware.
+  // No color fields: local pins ignore them. `pebble insert-pin` does render
+  // backgroundColor, because it bypasses the phone's local-pin path, so an
+  // emulator screenshot says nothing about real hardware.
   var layout = { type: 'genericPin', title: title };
   // Omitted, not emptied: an absent field must never enter the signature as ''.
   if (area) layout.subtitle = area;
@@ -401,20 +325,15 @@ function pinSig(pin) {
 // Planning and dedupe
 // ---------------------------------------------------------------------------
 
-// Decide what to PUT this fetch, and maintain the persisted dedupe map in the
-// same pass. MUTATES `state` and returns the same object identity, so the
-// caller writes back exactly what it passed in.
+// Returns {puts, state}: the pins to insert this fetch, and the persisted
+// dedupe map, mutated in place and returned as the same object. Never throws
+// for any input: it runs on an NWS response shape nobody controls, and
+// index.js's try/catch is only the second layer.
 //
-// This never throws for any input, deliberately: it runs off an NWS response
-// shape nobody controls, from a code path that must never disturb the weather
-// payload, and index.js's try/catch is the SECOND layer, not the first.
-//
-// It does NOT set `s` on anything — a plan is not a delivery. Only commitPin
-// does, and index.js calls it only once insertTimelinePin has returned without
-// throwing, exactly as tx_hash is committed only on the final chunk's ACK: a
-// push that dies halfway must not poison the cache into skipping that pin
-// forever. (That is weaker proof than the ACK — the local-pin call reports
-// nothing at all — which index.js records at its call site.)
+// It never sets `s`, because a plan is not a delivery. Only commitPin does,
+// and index.js calls it only once Pebble.insertTimelinePin() has returned
+// without throwing, the only evidence that call gives. An insert that throws
+// therefore cannot poison the cache into skipping that pin forever.
 function planPins(features, state, nowSec) {
   if (!state || typeof state !== 'object') state = {};
   // Same guard as buildPin's, for the same reason: nowSec drives the GC cutoff
@@ -442,15 +361,11 @@ function planPins(features, state, nowSec) {
   // Duck-typed rather than Array.isArray'd, and length-checked rather than
   // trusted: `features` comes straight off a parsed JSON body.
   var feats = (features && typeof features.length === 'number') ? features : [];
-  // ONE representative per pin id, chosen here rather than downstream. NWS
-  // splits a single VTEC product into per-zone segments that arrive as separate
-  // features carrying the same office/phenom/sig/ETN: 15 of 142 distinct pin
-  // ids in one live nationwide feed had 2-10 of them (a Hurricane Watch had
-  // 10). Pushing a candidate per feature made the same id appear twice in one
-  // plan, so each insert overwrote the other and only the last one's signature
-  // was committed — the user's pin rewrote itself with a different county group
-  // every heartbeat, forever, and the dedupe never converged. Collapsing is not
-  // a loss: one pin id can only ever hold one segment's text.
+  // One representative per pin id. NWS splits a VTEC product into per-zone
+  // segments that arrive as separate features sharing office/phenom/sig/ETN; a
+  // candidate per feature would make each insert overwrite the other, and the
+  // pin would rewrite itself every heartbeat without the dedupe converging. One
+  // id can only hold one segment's text anyway.
   var chosen = {}, ids = [];
 
   for (i = 0; i < feats.length; i++) {
@@ -464,10 +379,10 @@ function planPins(features, state, nowSec) {
     e = state[id];
     var r = buildPin(props, (e && e.t) || 0, nowSec);
     if (!r) continue;
-    // The anchor stored on first sight is the POST-clamp time, so a clamped
-    // anchor is remembered as clamped and does not re-derive from a drifting
-    // onset on the next beat. Segments after the first therefore all build
-    // against the same anchor, which is what keeps them comparable below.
+    // The anchor stored on first sight is the post-clamp time, so it never
+    // re-derives from a drifting onset, though it can still re-clamp (see
+    // PIN_TIME_FLOOR_SEC). Segments after the first all build against the same
+    // anchor, which is what keeps them comparable below.
     if (!e) { e = { t: r.time, x: 0, s: null }; state[r.id] = e; }
     // endSec 0 means neither `ends` nor `expires` parsed; the entry still needs
     // a GC key, and time+60 matches the 1-minute duration buildPin emitted.
@@ -487,29 +402,22 @@ function planPins(features, state, nowSec) {
       c.sev = (props.severity === 'Extreme') ? 1 : 0;
       c.x = x; c.sig = sig; c.pin = r.pin;
     }
-    // Written here and not after the cap below, which sorts on it: an entry
-    // created this pass would otherwise still read x 0 there, so the cap would
-    // spare every new entry and evict the ones that survived the last plan —
-    // measured as 8 PUTs a beat forever on a nationwide feed carrying well over
-    // the MAX_STATE_ENTRIES cap. (Two such feeds were used across this section's
-    // reproductions, 127 and 142 distinct ids; which one produced this figure
-    // was not written down, so it is deliberately not named here.)
+    // Written here, not after the cap below, which sorts on it: a new entry
+    // would otherwise still read x 0 there, so the cap would spare every new
+    // entry and evict the survivors of the last plan, and above the cap the
+    // dedupe would never converge.
     e.x = chosen[r.id].x;
   }
 
-  // Hard cap, run AFTER the loop. Running it before was doubly wrong: one plan
-  // could still leave more than MAX_STATE_ENTRIES behind (measured: 64 seeded
-  // plus a 12-alert feed left 76), and — worse — it evicted lowest-`x` first,
-  // which is exactly the order the candidate sort below pushes in. Above 64
-  // distinct ids every entry committed on a 200 was deleted before the next
-  // plan could read it, recreated with s null, and re-inserted forever: measured at
-  // 8 PUTs a beat for 60 straight beats on the live nationwide feed, the same
-  // 8 ids every time, while the other 119 alerts were never pushed at all.
+  // Hard cap, run after the loop. Run before it, the cap could still leave
+  // more than MAX_STATE_ENTRIES behind, and evicting lowest-`x` first would
+  // match the order the candidate sort pushes in: above the cap every
+  // committed entry would be deleted before the next plan read it, and
+  // re-inserted forever.
   //
-  // So: entries this plan did not see go first (deadest end first — they have
-  // left the feed), and only then live ones, LAST end first. Dropping the
-  // latest-ending live entry is the one choice that cannot fight the sort,
-  // which ranks soonest-ending first.
+  // Entries this plan did not see go first (deadest end first), then live ones,
+  // latest end first. Dropping the latest-ending live entry is the one choice
+  // that cannot fight the sort, which ranks soonest-ending first.
   for (k in state) { if (state.hasOwnProperty(k)) keys.push(k); }
   if (keys.length > MAX_STATE_ENTRIES) {
     keys.sort(function (a, b) {
@@ -524,18 +432,18 @@ function planPins(features, state, nowSec) {
     for (i = 0; i < keys.length - MAX_STATE_ENTRIES; i++) delete state[keys[i]];
   }
 
-  // Candidates come from what SURVIVED the cap, so an evicted id is never
-  // pushed — that is the other half of the convergence fix above.
+  // Candidates come only from entries that survived the cap, so an evicted id
+  // is never pushed.
   var cands = [];
   for (i = 0; i < ids.length; i++) {
     var cid = ids[i];
     e = state[cid];
     if (!e) continue;                    // evicted by the cap just above
     var ch = chosen[cid];
-    // Re-insert on any signature change — time, duration, title, subtitle,
-    // body or tinyIcon. In practice that is an EXT/CON reissue that moves
-    // `ends`, or an updated storm description. Both are genuine updates to the
-    // SAME id (inserting an existing id updates that pin), not duplicates.
+    // Re-insert on any signature change: time, duration, title, subtitle, body
+    // or tinyIcon. That is an EXT/CON reissue that moves `ends`, an updated
+    // storm description, or an anchor re-clamping past PIN_TIME_FLOOR_SEC.
+    // Inserting an existing id updates that pin rather than adding a second.
     if (e.s !== ch.sig) {
       cands.push({ sev: ch.sev,
                    put: { id: cid, pin: ch.pin, sig: ch.sig, endSec: ch.x } });
@@ -555,11 +463,9 @@ function planPins(features, state, nowSec) {
   return { puts: puts, state: state };
 }
 
-// Record that the TIMELINE now holds this signature. A missing entry is not an
-// error — the guard is defensive, not a case anyone has produced: insertion is
-// synchronous and the GC runs at the top of planPins, so nothing can drop an
-// entry between a plan and its commit. If one ever were dropped, the next plan
-// recreates it with s null and re-pushes — wasteful at worst, never wrong.
+// Records that the timeline now holds this signature. A missing entry is
+// ignored; the next plan recreates it with s null and re-inserts, which is
+// wasteful but never wrong.
 function commitPin(state, id, sig) {
   if (!state || typeof state !== 'object') state = {};
   if (state[id]) state[id].s = sig;

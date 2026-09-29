@@ -36,13 +36,12 @@ var SLOT_OPTIONS = [
   { "label": "None",           "value": "4" }
 ];
 
-// 0-4 are fixed sizes; 6-9 are auto with that size as the ceiling ("at most
-// this size": the band is reserved at the ceiling, the glyphs shrink to fit).
-// Value 5 (auto with an Extra Small ceiling) is identical to fixed Extra
-// Small, so it is handled in code but omitted from the UI. Super Large is
-// appended as 10 (fixed) and 11 (auto) rather than renumbering: Clay prefills
-// from saved values, so a renumbered code would silently change every saved
-// size.
+// 0-4 are fixed Extra Small..Extra Large; 6-9 are auto with ceiling value - 5
+// ("at most this size": the band is reserved at the ceiling, the glyphs shrink
+// to fit). Value 5, auto with an Extra Small ceiling, renders as fixed Extra
+// Small, so code handles it but the UI omits it. Super Large is 10 (fixed) and
+// 11 (auto), appended rather than renumbered: Clay prefills from saved values,
+// so a renumbered code would silently change every saved size.
 var SIZE_OPTIONS = [
   { "label": "Extra Small", "value": "0" },
   { "label": "Small",       "value": "1" },
@@ -57,9 +56,9 @@ var SIZE_OPTIONS = [
   { "label": "Super Large, shrink to fit", "value": "11" }
 ];
 
-// One line of the face: what it shows, and how big. The inner two lines keep
-// the messageKeys they shipped with (TopSlot/TopFont, BottomSlot/BottomFont)
-// so settings already saved on the phone survive the upgrade to four lines.
+// One line of the face: what it shows, and how big. The inner lines keep the
+// historical keys TopSlot/TopFont and BottomSlot/BottomFont, because renaming a
+// messageKey resets every saved config.
 function line(label, slotKey, slotDefault, fontKey, fontDefault) {
   return [
     {
@@ -80,7 +79,7 @@ function line(label, slotKey, slotDefault, fontKey, fontDefault) {
 }
 
 // Section headings default to h4, so the page title is bumped one level up to
-// keep Map and Overlay reading as subordinate to it.
+// keep the section headings reading as subordinate to it.
 module.exports = [
   {
     "type": "heading",
@@ -90,9 +89,9 @@ module.exports = [
   {
     "type": "text",
     // The $ in the URL is %24-encoded: Clay injects this config as the
-    // replacement string of a String.replace ($$CONFIG$$ in index.js), where
-    // a literal "$'" would splice in the page template's tail and destroy the
-    // settings UI.
+    // replacement string of a String.replace ($$CONFIG$$ in Clay's own
+    // index.js), where a literal "$'" would splice in the page template's
+    // tail and destroy the settings UI.
     "defaultValue":
       "Like this watchface? Consider " +
       "<a href='https://herzog.tech/%24' target='_blank'>buying the author a tea</a>."
@@ -104,13 +103,11 @@ module.exports = [
         "type": "heading",
         "defaultValue": "Map"
       },
-      // RadarMode is phone-side only, like Zoom and WxUnits: pkjs blends the
-      // radar into the basemap and sends one composite image, so Disabled and
-      // the translucency rewrite are both applied before anything is
-      // transferred and the watch has no use for the value. The messageKey is
-      // deliberately unchanged -- renaming a Clay key resets every saved
-      // config -- only its destination moved, from the watch's Settings blob
-      // to localStorage.RadarMode, which index.js reads on every refresh.
+      // Phone-side only, like Zoom and WxUnits: pkjs applies the mode while
+      // blending, so it is not a package.json messageKey and never reaches the
+      // watch; index.js reads localStorage.RadarMode on every refresh. Never
+      // rename the key: Clay prefills by messageKey, so a rename resets every
+      // saved config.
       {
         "type": "select",
         "messageKey": "RadarMode",
@@ -133,16 +130,9 @@ module.exports = [
           { "label": "Region (500 km)", "value": "2" }
         ]
       },
-      // UseGps and ManualLoc are phone-side only, like Zoom, RadarMode and
-      // WxUnits:
-      // pkjs owns all coordinate math, so neither is a package.json
-      // messageKey and neither ever reaches the watch. custom-clay.js hides
-      // the input while the toggle is on and disables Save while the text
-      // does not parse as a valid coordinate pair.
-      // RefreshInterval IS watch-bound (unlike Zoom/WxUnits): the watch owns
-      // the heartbeat that drives both imagery and weather, so the value has
-      // to reach tick_handler. Values must divide 60 -- the watch fires on
-      // tm_min % value, and a non-divisor would tick unevenly across the hour.
+      // Watch-bound, unlike Zoom and WxUnits: the watch owns the heartbeat
+      // that drives imagery and weather. Values must divide 60, because
+      // tick_handler fires on tm_min % value.
       {
         "type": "select",
         "messageKey": "RefreshInterval",
@@ -158,6 +148,10 @@ module.exports = [
         ],
         "description": "How often the radar, weather, and alerts refresh. Longer intervals use less battery."
       },
+      // UseGps and ManualLoc are phone-side only: pkjs owns all coordinate
+      // math, so neither is a package.json messageKey. custom-clay.js hides
+      // the input while the toggle is on and disables Save until the text
+      // parses as a coordinate pair.
       {
         "type": "toggle",
         "messageKey": "UseGps",
@@ -204,9 +198,8 @@ module.exports = [
           "label": "Text Outline Color",
           "defaultValue": "FFFFFF"
         },
-        // Watch-bound, like RefreshInterval: the badge is drawn watch-side
-        // from connection_service state the phone never sees. Sent as a plain
-        // boolean and stored as one. Defaults on.
+        // Watch-bound, like RefreshInterval: the badge is drawn from
+        // connection_service state the phone never sees.
         {
           "type": "toggle",
           "messageKey": "BtIndicator",
@@ -223,18 +216,12 @@ module.exports = [
         "type": "heading",
         "defaultValue": "Weather"
       },
-      // WxUnits is phone-side only -- stored in localStorage by webviewclosed,
-      // never forwarded to the watch, exactly like Zoom. A units change
-      // invalidates the cached weather payload and refetches.
-      //
-      // This one setting drives EVERY unit the face renders, which is why the
-      // label is "Units" and not "Temperature" any more: a user who asked for
-      // Celsius wants km/h and millibars with it. Only the label and the
-      // option text changed -- the messageKey and the 0/1 values are
-      // deliberately untouched, because Clay prefills the page from
-      // localStorage['clay-settings'] keyed by messageKey, so a rename would
-      // silently reset every saved config (the same hazard recorded against
-      // RadarMode above).
+      // Phone-side only, like Zoom: webviewclosed stores it in localStorage
+      // and a change refetches weather. It drives every unit the face renders,
+      // because a user who asks for Celsius wants km/h and millibars too.
+      // Never rename the messageKey or renumber its values: Clay prefills from
+      // localStorage['clay-settings'] keyed by messageKey, so either silently
+      // resets or changes every saved config.
       {
         "type": "select",
         "messageKey": "WxUnits",
@@ -245,12 +232,11 @@ module.exports = [
           { "label": "Metric (°C, km/h, mb)",      "value": "1" }
         ]
       },
-      // Phone-side only, exactly like WxUnits above: pkjs owns the NWS alert
-      // fetch and the timeline PUT, so this value never reaches the watch and
-      // costs it no heap. It is deliberately NOT in package.json's messageKeys.
-      // Defaults ON, which is why index.js reads it through numSetting()'s
-      // explicit-default branch rather than a bare Number() -- the key is null
-      // on a fresh install and Number(null) is 0.
+      // Phone-side only, like WxUnits: pkjs owns the alert fetch and the
+      // timeline insert, so it is deliberately not a package.json messageKey.
+      // Defaults on, so index.js reads it through numSetting()'s explicit
+      // default: the key is null on a fresh install and Number(null) is 0.
+      // Never rename the key; a rename resets every saved config.
       {
         "type": "toggle",
         "messageKey": "TimelineAlerts",
@@ -261,9 +247,8 @@ module.exports = [
     ]
   },
   {
-    // Attribution. The NSSL MRMS and USGS National Map pages block or time
-    // out for non-browser clients but resolve in a real browser (confirmed by
-    // hand, Aug 2026); the NWS API docs link verifies mechanically too.
+    // Attribution. The NSSL and USGS links block or time out for non-browser
+    // clients, so a link checker reports them dead; they resolve in a browser.
     "type": "text",
     "defaultValue":
       "Radar data by <a href='https://www.nssl.noaa.gov/projects/mrms/' target='_blank'>NOAA</a>, " +

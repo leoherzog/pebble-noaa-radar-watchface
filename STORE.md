@@ -1,8 +1,10 @@
 # Pebble App Store Listing
 
-Draft copy and assets for the appstore listing. Everything here is what
+Copy and assets for the
+[appstore listing](https://apps.repebble.com/2029ab9c84f946e1b125f8e0): what
 `pebble publish` prompts for, plus the fields the web dashboard
-(`appstore-api.repebble.com/dashboard`) lets you edit afterwards.
+(`appstore-api.repebble.com/dashboard`) lets you edit afterwards. The full
+description names v1.1.0 features, so it must not go live beside an older build.
 
 ## App name
 
@@ -46,11 +48,11 @@ over Bluetooth. The watch just draws it.
 - Custom text and outline colors — every line gets a halo so it stays readable over busy map areas
 - National Weather Service weather: current conditions, temperature, feels like, dew point, humidity, wind, pressure, today's forecast, tonight/tomorrow, high/low, and active alerts, in imperial or metric units
 - Sunrise/sunset and the golden hour window, computed for your exact location and shown in your watch's own 12- or 24-hour format
-- Alert-aware lines that show your normal weather until a watch or warning takes over, and clear themselves when the alert expires even if your phone is out of reach
+- Alert-aware lines that show your normal weather until an alert takes over, and clear themselves when the alert expires even if your phone is out of reach
 - Severe alerts pushed to your Pebble timeline as pins that last as long as the alert does
 - Translucent, opaque, or radar off entirely — it makes a fine plain topo map face
 - A Bluetooth badge appears the moment your phone goes out of range, so you know the radar has stopped updating
-- Frugal by design: imagery is cut to 16 colors before it leaves the phone, an unchanged refresh isn't sent to the watch at all, and weather is only fetched when a weather line is actually configured
+- Frugal by design: imagery is cut to 16 colors before it leaves the phone, an unchanged refresh isn't sent to the watch at all, and weather is only fetched when a weather line is actually configured or timeline pins are on
 
 Radar, basemap, and weather come from NOAA, the USGS National Map, and
 api.weather.gov — all free, no API keys, no accounts.
@@ -67,14 +69,13 @@ api.weather.gov — all free, no API keys, no accounts.
 
 ## Category
 
-Not applicable. `pebble publish` skips the category prompt for watchfaces
-(`app_type == "watchface"`), and the Rebble portal docs confirm watchfaces take
-neither a category nor app icons. Nothing to prepare.
+Not applicable: `pebble publish` skips the category prompt for watchfaces, and
+the Rebble portal takes neither a category nor app icons for them.
 
 ## Icons
 
 Not required. The 80×80 / 144×144 icon prompts in `pebble publish` are
-watchapp-only. The skill's `create_app_icons.py` does not apply here.
+watchapp-only.
 
 ## Keywords
 
@@ -93,7 +94,7 @@ start with `emery_`, `basalt_` or `gabbro_` is rejected).
 |---|---|---|---|
 | 1 | Minneapolis, MN | `<platform>_1_minneapolis-derecho.png` | A derecho west of the Twin Cities, yellow text, weekday / time / date / battery on all four lines |
 | 2 | Washington, DC | `<platform>_2_washington-dc-severe.png` | A line of storms over the Mid-Atlantic at State zoom, 24-hour clock, metric throughout — high/low in °C, wind in km/h with a gust, pressure in mb |
-| 3 | Dallas, TX | `<platform>_3_dallas-squall-line.png` | Translucent radar over the metroplex with the map showing through, forecast line at shrink-to-fit |
+| 3 | Dallas, TX | `<platform>_3_dallas-squall-line.png` | Translucent radar over the metroplex with the map showing through, the time at shrink-to-fit above today's forecast |
 | 4 | New Orleans, LA | `<platform>_4_new-orleans-francine.png` | Hurricane Francine's eye at Region zoom, opaque radar, current conditions on top and high/low below |
 | 5 | New York, NY | `<platform>_5_new-york-summer-storm.png` | City zoom over the harbor, dark text on a yellow halo — the inverted color scheme — with the sunrise/sunset span and humidity |
 
@@ -119,15 +120,16 @@ uv run --with pillow python screenshots/tools/banner.py
 - The **watch screen** is a `screenshots/store/` PNG at native pixels — emery and
   gabbro at 1:1, basalt at 1.5× nearest-neighbour — so the 16-colour composite
   and the halo'd slot text stay crisp. Nothing is interpolated.
-- The **backdrop** is a real 720×320 USGS topo + archived NEXRAD fetch of the
-  Washington DC scene (scenario 11, widened to a 380 km span for the framing),
-  blurred and scrimmed. A screenshot blown up 4× was tried first and is mush,
-  and it drags the watch's own clock text up with it. Full colour, not the
-  16-colour composite: it is a wash behind type, not a claim about what the
-  watch renders. `banner_bg.py` uses the same Web Mercator math as
-  `index.js:1298`, and the archive still needs full seconds in `TIME`.
-- The banner is the one place the reflectivity ramp appears as itself — a nine-
-  swatch rule under the title, standing in for a legend the face has no room for.
+- The **backdrop** is a real 720×320 USGS topo plus archived NEXRAD fetch of
+  the Washington DC scene (scenario 11, widened to a 380 km span), blurred and
+  scrimmed. A blown-up screenshot is mush and drags the watch's clock text with
+  it. It is full colour rather than the 16-colour composite, because it is a
+  wash behind type, not a claim about what the watch renders. `banner_bg.py`
+  uses the same Web Mercator math as `locationSuccess()` in `index.js`, and the
+  archive needs full seconds in `TIME`.
+- The nine-swatch rule under the title is decoration in classic NWS radar
+  colours, like the archived backdrop's. It is not a legend for the face, whose
+  live MRMS layer uses a different ramp.
 
 Alternate styles exist behind `--style` (`bleed` and `crisp` build the backdrop
 out of a screenshot, `panel` is flat dark) if the fetched backdrop ever needs to

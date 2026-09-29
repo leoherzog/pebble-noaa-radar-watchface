@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Pixel-diff two gallery trees. pixdiff.py <dir-a> <dir-b>
 
-Reports, per tile, the number of differing pixels. Zero is the pass criterion
-for any tile whose every slot string is deterministic -- CLAUDE.md's rule is
-that text-geometry changes must be caught by pixel diff and never by eye, since
-a one-pixel drift is invisible to a human and fatal to the auto-font invariant.
+Reports differing pixels per tile. Zero is the pass criterion for any tile
+whose every slot string is deterministic: text-geometry changes must be caught
+by pixel diff, since a one-pixel drift is invisible by eye and breaks the
+auto-font invariant.
 
-ImageMagick is not installed here; PIL is. Note that a missing file is reported
-as MISSING rather than skipped: a silently absent tile would otherwise read as
-a pass.
+Tiles are enumerated from <dir-a>. One missing from <dir-b> is reported as
+MISSING rather than skipped; one missing from <dir-a> is never compared.
 """
 import os
 import sys
