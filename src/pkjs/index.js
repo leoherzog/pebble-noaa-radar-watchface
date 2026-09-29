@@ -581,7 +581,8 @@ function exportUrl(base, bbox, transparent) {
 
 // ---------------------------------------------------------------------------
 // Weather (slots 15-31) — NWS JSON API, api.weather.gov. No key, no provider.
-// 15-28 are fetched; 29-31 (sun times) are computed here from the location.
+// 15-28 and 31 are fetched; 29-30 (sun times) are computed here from the
+// location.
 // Every string is assembled, unit-converted, abbreviated and width-fitted
 // here; the watch receives finished strings and two expiry timestamps.
 // ---------------------------------------------------------------------------
@@ -599,6 +600,7 @@ var WX_SLOT_STRINGS = {
   18: ['alert'],  19: ['alert2'],
   20: ['alert', 'hilo'],                  // alert, else high/low
   21: ['alert', 'cond'],                  // alert, else current conditions
+  31: ['alert', 'alert2', 'cond'],        // alert, else upcoming, else conditions
   22: ['temp'],   23: ['feels'],          24: ['dew'],
   25: ['hum'],    26: ['wind'],           27: ['pres'],
   28: ['fcst2'],                          // the SECOND forecast period
@@ -1231,7 +1233,7 @@ function buildAlertStrings(feats, nowSec) {
 }
 
 // ---------------------------------------------------------------------------
-// Sun times (slots 29-31) — computed here, formatted on the watch.
+// Sun times (slots 29-30) — computed here, formatted on the watch.
 //
 // These four numbers are the only weather values that cross as INTEGERS. The
 // watch renders them because 12/24-hour is clock_is_24h_style(), which never
@@ -1552,8 +1554,8 @@ function assembleWx(lat, lon) {
     if (!tOldest || fc.t < tOldest) tOldest = fc.t;
   }
 
-  // Mirrors fetchWeather's wantAlert. slotsFrom('alerts') is {18,19,20,21},
-  // so the fallback slots keep both of their inputs.
+  // Mirrors fetchWeather's wantAlert. slotsFrom('alerts') is {18,19,20,21,31},
+  // so the fallback slots keep all of their inputs.
   var al = wxUses(slotsFrom('alerts')) ? readWx('wx_alerts') : null;
   if (al && al.f) {
     var r = buildAlertStrings(al.f, nowSec);

@@ -95,7 +95,8 @@ enum { SLOT_TOP1, SLOT_TOP2, SLOT_BOT1, SLOT_BOT2 };
 // 15 Current conditions, 16 Today's forecast, 17 High/Low, 18 Active alerts,
 // 19 Alerts + upcoming, 20 Alerts else High/Low, 21 Alerts else Conditions,
 // 22 Temperature, 23 Feels like, 24 Dew point, 25 Humidity, 26 Wind,
-// 27 Pressure, 28 Tonight/Tomorrow, 29 Sunrise/Sunset, 30 Golden hour.
+// 27 Pressure, 28 Tonight/Tomorrow, 29 Sunrise/Sunset, 30 Golden hour,
+// 31 Alerts else upcoming else Conditions.
 //
 // The persisted blob is VERSIONED, not inferred. load_settings() accepts it
 // only when its length and its version byte both match this build, and falls
@@ -615,6 +616,19 @@ static void format_slot(uint8_t kind, bool super, char *buf, size_t size) {
       fmt_alert(buf, size, s_wx_alert, s_wx_exp, now);
       if (buf[0] == '\0') {
         fmt_wx(buf, size, kind == 20 ? s_wx_hilo : s_wx_cond, now);
+      }
+      break;
+    case 31:  // alert, else upcoming alert, else current conditions
+      // In-effect alerts strictly first. WX_ALERT2 is the top-ranked alert of
+      // ALL of them, so once nothing is in effect it is the next upcoming one,
+      // with its lead time ("in 3h"). Same expiry and staleness handling as
+      // cases 20/21, one step longer.
+      fmt_alert(buf, size, s_wx_alert, s_wx_exp, now);
+      if (buf[0] == '\0') {
+        fmt_alert(buf, size, s_wx_alert2, s_wx_exp2, now);
+      }
+      if (buf[0] == '\0') {
+        fmt_wx(buf, size, s_wx_cond, now);
       }
       break;
     case 22: fmt_wx(buf, size, s_wx_temp,  now); break;

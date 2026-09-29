@@ -32,6 +32,7 @@ var SLOT_OPTIONS = [
   { "label": "Alerts + Upcoming",      "value": "19" },
   { "label": "Alerts, else High / Low","value": "20" },
   { "label": "Alerts, else Conditions","value": "21" },
+  { "label": "Alerts, else Upcoming, else Conditions", "value": "31" },
   { "label": "None",           "value": "4" }
 ];
 
