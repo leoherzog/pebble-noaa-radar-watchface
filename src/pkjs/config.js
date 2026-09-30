@@ -1,6 +1,7 @@
-// All four slot dropdowns and all four size dropdowns offer identical choices,
-// so they share one array each. That is safe because the options array is only
-// ever read: a select's state is its own value, never anything stored in options.
+// All four slot dropdowns offer identical choices, and so do the size
+// dropdowns bar chalk's outer pair, so they share one array each. That is
+// safe because the options array is only ever read: a select's state is its
+// own value, never anything stored in options.
 var SLOT_OPTIONS = [
   { "label": "Time",           "value": "0" },
   { "label": "Date",           "value": "1" },
@@ -56,11 +57,26 @@ var SIZE_OPTIONS = [
   { "label": "Super Large, shrink to fit", "value": "11" }
 ];
 
+// chalk's outer lines sit where the visible chord is narrowest, so the watch
+// caps them at Small (slot_font() in main.c) and chalk's dropdown offers only
+// what renders. custom-clay.js maps a saved size this list lacks to its clamp.
+var SIZE_OPTIONS_CHALK_OUTER = [
+  { "label": "Extra Small", "value": "0" },
+  { "label": "Small",       "value": "1" },
+  { "label": "Small, shrink to fit", "value": "6" }
+];
+
 // One line of the face: what it shows, and how big. The inner lines keep the
 // historical keys TopSlot/TopFont and BottomSlot/BottomFont, because renaming a
 // messageKey resets every saved config.
-function line(label, slotKey, slotDefault, fontKey, fontDefault) {
-  return [
+//
+// An outer line passes chalkFontDefault and gets two size items on one
+// messageKey. Clay builds only the item whose capabilities match the watch,
+// and the two capabilities are exact complements, so every platform sees
+// exactly one; serialize() and getItemByMessageKey() are keyed by messageKey
+// and would silently keep only the last if both were ever built.
+function line(label, slotKey, slotDefault, fontKey, fontDefault, chalkFontDefault) {
+  var items = [
     {
       "type": "select",
       "messageKey": slotKey,
@@ -76,6 +92,18 @@ function line(label, slotKey, slotDefault, fontKey, fontDefault) {
       "options": SIZE_OPTIONS
     }
   ];
+  if (chalkFontDefault !== undefined) {
+    items[1].capabilities = ["NOT_PLATFORM_CHALK"];
+    items.push({
+      "type": "select",
+      "messageKey": fontKey,
+      "label": label + " Size",
+      "defaultValue": chalkFontDefault,
+      "options": SIZE_OPTIONS_CHALK_OUTER,
+      "capabilities": ["PLATFORM_CHALK"]
+    });
+  }
+  return items;
 }
 
 // Section headings default to h4, so the page title is bumped one level up to
@@ -178,10 +206,11 @@ module.exports = [
     "type": "section",
     "items": [].concat(
       [{ "type": "heading", "defaultValue": "Overlay" }],
-      line("Top Line 1",    "TopSlot1",     "4", "TopFont1",     "2"),
+      // chalk's outer default is Small, the watch's clamp of Medium.
+      line("Top Line 1",    "TopSlot1",     "4", "TopFont1",     "2", "1"),
       line("Top Line 2",    "TopSlot",      "0", "TopFont",      "4"),
       line("Bottom Line 1", "BottomSlot",   "1", "BottomFont",   "3"),
-      line("Bottom Line 2", "BottomSlot2",  "4", "BottomFont2",  "2"),
+      line("Bottom Line 2", "BottomSlot2",  "4", "BottomFont2",  "2", "1"),
       // The outline is an 8-direction halo the watch paints under the glyphs
       // so text stays readable over busy map areas. Both are plain pickers;
       // matching the two colors renders as slightly bolded solid text.

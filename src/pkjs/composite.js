@@ -2,9 +2,9 @@
  * Phone-side compositing: blend the USGS topo basemap and the NOAA MRMS
  * reflectivity overlay into one 16-color 4bpp PNG, so the watch holds a single
  * frame and never composites. Pure and node-requirable, in strict ES5 for the
- * legacy pkjs runtime. Width and height are parameters, never captured:
- * index.js reassigns IMG_W/IMG_H at 'ready', so a load-time capture would
- * render emery-sized imagery on basalt.
+ * legacy pkjs runtime. Width, height and roundness are parameters, never
+ * captured: index.js sets IMG_W/IMG_H and WATCH_ROUND at 'ready', so a
+ * load-time capture would render emery-sized imagery on basalt.
  */
 
 // zlib for the IDAT. Declared in package.json rather than leaned on as a
@@ -38,15 +38,21 @@ var pako = require('pako');
 // bmRgba: quantized basemap RGBA, w*h*4. rdRgba: quantized radar RGBA, or null
 // when the radar layer is Disabled (every pixel then reads as a === 0, i.e. a
 // pass-through basemap). radarMode: 0 disabled, 1 translucent, 2 opaque.
-// Returns {bytes: Uint8Array PNG, colors: exact palette size, folded: after fold}.
-function buildComposite(bmRgba, rdRgba, radarMode, w, h) {
+// round: the display is round. Pixels it hides then carry no weight in the
+// histogram, the tier labels or the fold, and are all written as palette
+// index 0, which exists because some pixel always shows.
+// Returns {bytes: Uint8Array PNG, colors: exact palette size over the visible
+// pixels, folded: after fold}.
+function buildComposite(bmRgba, rdRgba, radarMode, w, h, round) {
   var translucent = (radarMode === 1);
   var n = w * h;
   var fb = new Uint8Array(n);              // 6-bit display color per pixel
   var tally = new Int32Array(64 * 65);     // [outColor * 65 + (tierLabel + 1)]
   var i;
+  var hidden = hiddenPixels(w, h, round);
 
   for (i = 0; i < n; i++) {
+    if (hidden && hidden[i]) continue;
     var p = i * 4;
     var br = bmRgba[p], bg = bmRgba[p + 1], bb = bmRgba[p + 2];
     var a = 0, sr = 0, sg = 0, sb = 0;
@@ -96,7 +102,9 @@ function buildComposite(bmRgba, rdRgba, radarMode, w, h) {
   var index = new Uint8Array(64);
   for (i = 0; i < pal.length; i++) index[pal[i]] = i;
   var idx = new Uint8Array(n);
-  for (i = 0; i < n; i++) idx[i] = index[map[fb[i]]];
+  for (i = 0; i < n; i++) {
+    idx[i] = (hidden && hidden[i]) ? 0 : index[map[fb[i]]];
+  }
 
   return {
     bytes: png4(idx, pal, w, h),
@@ -158,6 +166,50 @@ function foldTo16(hist, tier) {
   // palette is always ascending by 6-bit value — deterministic palette order
   // is what makes the hash cache able to hit at all.
   return { pal: cols, map: map };
+}
+
+// ---------------------------------------------------------------------------
+// Round-display corners
+// ---------------------------------------------------------------------------
+//
+// The firmware's topleft_mask for each round display, keyed by width: row y
+// shows columns [m, w - 1 - m] with m = mask[min(y, h - 1 - y)]
+// (reference/PebbleOS src/fw/board/displays/display_getafix.c; 180 is
+// g_gbitmap_legacy_3x_data_row_infos, the table SDK 4.33's chalk QEMU image
+// carries too).
+// Only these tables are safe: a computed circle one pixel too tight would
+// blank a pixel the watch shows. The watch draws the composite at its full
+// bounds, so frame pixels and display pixels coincide.
+var ROUND_MASK = {
+  180: [
+    76, 71, 66, 63, 60, 57, 55, 52, 50, 48, 46, 45, 43, 41, 40, 38, 37,
+    36, 34, 33, 32, 31, 29, 28, 27, 26, 25, 24, 23, 22, 22, 21, 20, 19,
+    18, 18, 17, 16, 15, 15, 14, 13, 13, 12, 12, 11, 10, 10, 9, 9, 8, 8, 7,
+    7, 7, 6, 6, 5, 5, 5, 4, 4, 4, 3, 3, 3, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  ],
+  260: [
+    113, 107, 102, 98, 94, 90, 87, 85, 82, 80, 77, 75, 73, 71, 69, 67, 65, 64,
+    62, 60, 59, 57, 56, 54, 53, 52, 50, 49, 48, 46, 45, 44, 43, 42, 41, 40, 39,
+    38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 29, 28, 27, 26, 26, 25, 24, 23, 23,
+    22, 21, 21, 20, 19, 19, 18, 18, 17, 16, 16, 15, 15, 14, 14, 13, 13, 12, 12,
+    11, 11, 10, 10, 10, 9, 9, 8, 8, 8, 7, 7, 6, 6, 6, 5, 5, 5, 5, 4, 4, 4, 4, 3,
+    3, 3, 3, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0
+  ]
+};
+
+// 1 for each pixel of a w x h frame that a round display hides, or null when
+// every pixel shows: a rectangular display, or a size with no ROUND_MASK row.
+function hiddenPixels(w, h, round) {
+  var mask = (round && w === h) ? ROUND_MASK[w] : null;
+  if (!mask) return null;
+  var out = new Uint8Array(w * h), x, y, m;
+  for (y = 0; y < h; y++) {
+    m = mask[Math.min(y, h - 1 - y)];
+    for (x = 0; x < m; x++) out[y * w + x] = out[y * w + w - 1 - x] = 1;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

@@ -13,6 +13,12 @@ which carries watch-bound keys exclusively.
 screenshots.md: an ISO timestamp there makes index.js pull the radar layer
 from IEM's archived NEXRAD WMS instead of live MRMS.
 
+A scenario's 'weather' field holds wx_obs / wx_fcst / wx_alerts records in the
+shape index.js persists them. Each is written with its t restamped to now, so
+fetchWeather's interval gates skip the refetch, and alert onsets and expiries
+shift with it. 'WxPinned' is read only by the temporary fetchAlerts() patch,
+which then serves the seeded wx_alerts instead of the network.
+
 Usage: seed.py <platform> <scenario-id> [scenarios.json]
 """
 import dbm.dumb
@@ -20,6 +26,7 @@ import json
 import os
 import shutil
 import sys
+import time
 
 # Read from package.json: the localstorage file is named for the app UUID, and
 # a stale hardcoded copy would seed a store no emulator reads, exit 0, and
@@ -69,11 +76,28 @@ def main():
     db["RadarMode"] = str(scen["mode"])
     db["WxUnits"] = str(scen["units"])
     db["RadarArchive"] = scen["time"]
+    wx = scen.get("weather")
+    if wx:
+        now = int(time.time() * 1000)
+        for key, rec in wx.items():
+            rec = json.loads(json.dumps(rec))
+            shift = (now - rec["t"]) // 1000
+            rec["t"] = now
+            for f in rec.get("f", []):           # wx_alerts: 0 means absent
+                for k in ("on", "ex"):
+                    if f[k]:
+                        f[k] += shift
+            db[key] = json.dumps(rec, separators=(",", ":"))
+        # fetchWeather drops every weather cache unless this matches the
+        # rounded location; lat/lon are already at two decimals.
+        db["wx_lkey"] = "%.2f,%.2f" % (scen["lat"], scen["lon"])
+        db["WxPinned"] = "1"
     db.close()
 
-    print("seeded %s/%02d %s  loc=%s,%s zoom=%d mode=%d units=%d radar=%s"
+    print("seeded %s/%02d %s  loc=%s,%s zoom=%d mode=%d units=%d radar=%s wx=%s"
           % (platform, sid, scen["slug"], scen["lat"], scen["lon"],
-             scen["zoom"], scen["mode"], scen["units"], scen["time"]))
+             scen["zoom"], scen["mode"], scen["units"], scen["time"],
+             ",".join(sorted(wx)) if wx else "live"))
 
 
 if __name__ == "__main__":

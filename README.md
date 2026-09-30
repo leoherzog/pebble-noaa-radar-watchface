@@ -20,7 +20,7 @@ Your phone does the heavy lifting: it figures out where you are, fetches the map
 - ⚠️ **Alert-aware lines** — show your normal weather until an NWS alert takes over the line, or pick "Alerts, else Upcoming, else Conditions" to also count down to an alert that hasn't started yet. Alerts clear themselves when they expire, even if your phone is out of reach
 - 🗓️ **Severe alerts in your timeline** — tornado, severe thunderstorm, flash flood and other severe or extreme NWS alerts show up as timeline pins that run for as long as the alert does, then quietly age out on their own. Pins can take several minutes to arrive, so treat them as a record of what's in force, not as a siren
 - 🎨 **Translucent, opaque, or disabled radar** — or use it as a plain topo map face
-- 📶 **Bluetooth badge** — a Bluetooth rune appears in the top-left the moment your phone goes out of range, so you know the radar has stopped updating
+- 📶 **Bluetooth badge** — a Bluetooth rune appears in the top-left, or at the left edge of a round watch, the moment your phone goes out of range, so you know the radar has stopped updating
 - 🔋 **Frugal by design** — imagery is blended and re-encoded to 16 colors before it ever leaves the phone, a refresh that comes back looking identical isn't sent to the watch at all, and weather is only fetched if a weather line is actually configured (or timeline pins are on, which needs alerts either way)
 
 Radar, basemap, and weather data come from [NOAA](https://mapservices.weather.noaa.gov/), the [USGS National Map](https://basemap.nationalmap.gov/), and [api.weather.gov](https://www.weather.gov/documentation/services-web-api) — all free, no API keys. These services are US-only, so there's no imagery or weather outside the United States.
@@ -49,11 +49,11 @@ pebble install --emulator emery
 
 ## Requirements
 
-- A color Pebble: Pebble Time or Time Steel (`basalt`), Pebble Time 2 (`emery`), or Pebble Round 2 (`gabbro`)
+- A color Pebble: Pebble Time or Time Steel (`basalt`), Pebble Time Round (`chalk`), Pebble Time 2 (`emery`), or Pebble Round 2 (`gabbro`)
 - A location in the United States (that's where NOAA's radar coverage ends!)
 - The Pebble phone app, for location, networking, and settings
 
-Pebble Time Round (`chalk`) isn't supported. Its 180×180 screen is too small on two counts: text on the top and bottom lines gets clipped by the curve of the display, and there isn't reliably enough memory to decode a map image during heavy weather — which is when you'd want it most.
+On the round watches, every text line fits itself to the width of the circle at its height, shortening its text (or shrinking it, on a shrink-to-fit line) rather than running under the bezel. Pebble Time Round has the least room at the very top and bottom of its screen, so there Top Line 1 and Bottom Line 2 go up to Small, and its settings page only offers the sizes that fit.
 
 ## Configuration
 
@@ -66,10 +66,10 @@ Open the watchface's settings in the Pebble phone app.
 | Refresh Interval | How often the radar, weather, and alerts refresh: 5, 10, 15, 20, 30, or 60 minutes (default 10) |
 | Use GPS | Follow the phone's location, or turn off to enter a fixed latitude/longitude |
 | Top/Bottom Lines 1 & 2 | What each of the four text lines shows |
-| Line Sizes | Extra Small through Super Large, fixed or shrink-to-fit |
+| Line Sizes | Extra Small through Super Large, fixed or shrink-to-fit (the two outer lines stop at Small on Pebble Time Round) |
 | Text Color | Color of the four text lines (default black) |
 | Text Outline Color | Color of the halo drawn under the glyphs (default white) |
-| Bluetooth Disconnection Indicator | Show or hide the top-left badge shown while the phone is out of range (default on) |
+| Bluetooth Disconnection Indicator | Show or hide the badge shown while the phone is out of range (default on) |
 | Units | Imperial (°F, mph, inHg) or Metric (°C, km/h, mb) |
 | Send Severe Weather Alerts to Timeline | Push severe and extreme NWS alerts into your Pebble timeline as pins (default on) |
 

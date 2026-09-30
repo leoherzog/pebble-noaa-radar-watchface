@@ -30,8 +30,8 @@ var timeline = require('./timeline');
 var SunCalc = require('suncalc');
 var clayConfig = require('./config');
 // Config-page logic (show/hide the manual-location input, block an invalid
-// save). Injected into the page by toString(), so it shares no scope with
-// this file.
+// save, fit chalk's outer size dropdowns). Injected into the page by
+// toString(), so it shares no scope with this file.
 var customClay = require('./custom-clay');
 // Initialize Clay (autoHandleEvents off: we persist locally and re-fetch)
 var clay = new Clay(clayConfig, customClay, { autoHandleEvents: false });
@@ -47,15 +47,18 @@ var ZOOM_WIDTHS = [100000, 250000, 500000];   // City, State, Region (meters)
 // to the watch actually connected.
 // One row per targetPlatforms entry in package.json, and adding a platform
 // means adding both: a row for a platform the watch's heap guard would refuse
-// is worse than none. chalk is deliberately in neither (see CLAUDE.md,
-// Platform portability).
+// is worse than none. A round platform also needs a ROUND_PLATFORMS row.
 var PLATFORM_SIZES = {
   basalt:  [144, 168],
   emery:   [200, 228],
-  gabbro:  [260, 260]
+  gabbro:  [260, 260],
+  chalk:   [180, 180]
 };
 var IMG_W = 200;
 var IMG_H = 228;
+// The connected watch's ROUND_PLATFORMS row, or null for a rectangular or
+// unknown watch. 'ready' sets it with IMG_W/IMG_H.
+var WATCH_ROUND = null;
 
 var FALLBACK_LAT = 40.69;                     // Statue of Liberty
 var FALLBACK_LON = -74.04;
@@ -206,7 +209,7 @@ function pushTimelinePins(features) {
 // Transfer state machine
 // ---------------------------------------------------------------------------
 
-var CHUNK = 4096;      // the inbox is 8200 B on all three platforms; the
+var CHUNK = 4096;      // the inbox is 8200 B on all four platforms; the
                        // header tuples add ~50 B
 // The single-slot serialiser carries two kinds of work, dispatched on `kind`:
 //   {kind: 'img', bytes, hash, radarTime}  — chunked transfer of the composite
@@ -598,9 +601,10 @@ var lastLat = null;   // last rounded fix, for a units-change refetch
 var lastLon = null;
 
 // [slotCode, fontCode] for each of the four lines in display order, from the
-// persisted cfg2 blob. The parse is guarded, so a truncated blob cannot throw
-// out of 'ready' and take the imagery fetch down with the weather: no blob,
-// or a bad one, reads as "no lines configured".
+// persisted cfg2 blob; budgetFor() reads the index as the line's position.
+// The parse is guarded, so a truncated blob cannot throw out of 'ready' and
+// take the imagery fetch down with the weather: no blob, or a bad one, reads
+// as "no lines configured".
 function wxLines() {
   var lines = [];                             // fresh install / bad blob:
   var c = localStorage.getItem('cfg2');       // Time/Date defaults
@@ -635,31 +639,50 @@ function wxNeeded() {
 var CHAR_BUDGET_144 = [18, 16, 12, 10, 7, 5];
 var CHAR_BUDGET_200 = [25, 22, 16, 14, 10, 7];
 
+// Round displays, keyed on getActiveWatchInfo's platform name and never on
+// IMG_W, which would give chalk's 180 px the 200 px table. The watch insets
+// each band to the visible chord, so the outer lines (Top Line 1, Bottom
+// Line 2) get narrower tables of their own. chalk's outer table stops at
+// Small because the watch caps those lines there; a larger ceiling reads as
+// its last entry. A row here also makes composite.js blank the corners.
+var ROUND_PLATFORMS = {
+  chalk:  { inner: CHAR_BUDGET_144, outer: [12, 9] },
+  gabbro: { inner: CHAR_BUDGET_200, outer: [20, 17, 12, 9, 6, 3] }
+};
+
+// The char table for display line i, 0 = Top Line 1 .. 3 = Bottom Line 2.
+function budgetTable(i) {
+  if (!WATCH_ROUND) return IMG_W >= 180 ? CHAR_BUDGET_200 : CHAR_BUDGET_144;
+  return (i === 0 || i === 3) ? WATCH_ROUND.outer : WATCH_ROUND.inner;
+}
+
 // The budget is per string, not per slot code: the fallback slots (20, 21,
 // 31) display strings other slots also show, so each string takes the
 // minimum budget among every line that could display it.
 //
 // When any line displaying the string uses an auto font (codes 5-9 and 11),
-// target the Extra Small row instead so the watch has full-length text to
-// shrink. Abbreviating to the ceiling's budget would make the string always
-// fit at the ceiling, so the shrink would never fire. The 31-char cap still
-// applies (the Math.min below, and capBytes).
+// target the smallest Extra Small budget among those lines instead, so the
+// watch has full-length text to shrink. Abbreviating to the ceiling's budget
+// would make the string always fit at the ceiling, so the shrink would never
+// fire. The 31-char cap still applies: both minimums start there, and
+// capBytes backs it up.
 function budgetFor(codes) {
-  var table = IMG_W >= 180 ? CHAR_BUDGET_200 : CHAR_BUDGET_144;
   var best = 31;
+  var autoBest = 31;
   var anyAuto = false;
-  wxLines().forEach(function (l) {
-    if (codes.indexOf(l[0]) >= 0) {
-      // Font codes as main.c's slot_font_raw() documents them.
-      var f = l[1];
-      if ((f >= 5 && f <= 9) || f === 11) { anyAuto = true; return; }
-      if (f === 10) f = 5;
-      else if (!(f >= 0 && f <= 4)) f = 2;
-      if (table[f] < best) best = table[f];
-    }
+  wxLines().forEach(function (l, i) {
+    if (codes.indexOf(l[0]) < 0) return;
+    var table = budgetTable(i);
+    if (table[0] < autoBest) autoBest = table[0];
+    // Font codes as main.c's slot_font_raw() documents them.
+    var f = l[1];
+    if ((f >= 5 && f <= 9) || f === 11) { anyAuto = true; return; }
+    if (f === 10) f = 5;
+    else if (!(f >= 0 && f <= 4)) f = 2;
+    f = Math.min(f, table.length - 1);
+    if (table[f] < best) best = table[f];
   });
-  if (anyAuto) return Math.min(table[0], 31);
-  return best;
+  return anyAuto ? autoBest : best;
 }
 
 // Stage-2 word-level abbreviation, applied token-wise (multi-word entries
@@ -767,9 +790,12 @@ function isNum(v) { return typeof v === 'number' && isFinite(v); }
 //
 // Numeric slots use this rather than fitWx, whose tail truncation turns a
 // number into a different, plausible value ('Feels 78°' cut to 7 chars reads
-// 'Feels 7'). Their last rungs fit a budget of 7, which covers every size but
-// Super Large on the 144 px table (5); Wind's can overrun it ('WSW 12').
-// An overrunning last rung is returned anyway for the watch's ellipsis.
+// 'Feels 7'). Their last rungs fit a budget of 7, which covers every size
+// but Extra Large on gabbro's outer lines (6) and Super Large on the 144 px
+// table (5) and on gabbro's outer lines (3). Wind's overruns 5 ('WSW 12'),
+// and at 3 most rungs do; High / Low's ('H82') fits 3 for two-digit
+// temperatures. An overrunning last rung is returned anyway for the watch's
+// ellipsis.
 function pickWx(forms, budget) {
   for (var i = 0; i < forms.length; i++) {
     if (forms[i].length <= budget) return forms[i];
@@ -1306,7 +1332,7 @@ function assembleWx(lat, lon) {
     // ceiling, and the extra keys cost ~130 B of the 8,200 B inbox, cheaper
     // than six more gates to keep in sync.
     // The one numeric string with no ladder: at most 5 characters ('-100°'),
-    // it fits the tightest budget, Super Large on basalt (5).
+    // it fits every budget but Super Large on gabbro's outer lines (3).
     if (isNum(obs.temp)) {
       pl['WX_TEMP'] = capBytes(fmtTempFromC(obs.temp));
     }
@@ -1393,23 +1419,33 @@ function assembleWx(lat, lon) {
     if (fc.p.length >= 2 &&
         typeof fc.p[0].t === 'number' && typeof fc.p[1].t === 'number') {
       // Chronological order in both cases; the H/L labels carry the
-      // disambiguation across the day/night boundary and are never dropped.
+      // disambiguation across the day/night boundary, so every value shown
+      // keeps its label.
       //
       // Single letters; both alternatives were measured and rejected. The
       // Gothic fonts lack U+2191/2193 and U+25B2/25BC (missing-glyph boxes,
       // while '°' renders), and a custom font would cost six faces of app
       // heap for the size ladder. 'Hi'/'Lo' at 13 characters overruns
-      // CHAR_BUDGET_144's Medium budget of 12 and drops the degree sign,
+      // CHAR_BUDGET_144's Medium budget of 12 and falls to a shorter rung,
       // where this 11-character form fits. No gallery scenario covers that
       // case, so check any label change against the budget tables.
       var t0 = fmtTempFromF(fc.p[0].t);
       var t1 = fmtTempFromF(fc.p[1].t);
+      var a0 = fc.p[0].d ? 'H' : 'L';
+      var a1 = fc.p[0].d ? 'L' : 'H';
+      var n0 = t0.replace('°', '');
+      var n1 = t1.replace('°', '');
       // WX_HILO shows in slots 17 and 20, so it is width-fitted like every
       // other string — without a budget the auto-font XS rule could never
-      // apply to it either.
-      pl['WX_HILO'] = capBytes(fitWx(fc.p[0].d ? 'H ' + t0 + ' L ' + t1
-                                               : 'L ' + t0 + ' H ' + t1,
-                                     budgetFor(slotsShowing('hilo'))));
+      // apply to it either. A ladder, not fitWx: a tail cut splits the second
+      // number into a plausible wrong one ('H 82° L 6' at 9).
+      pl['WX_HILO'] = capBytes(pickWx([
+        a0 + ' ' + t0 + ' ' + a1 + ' ' + t1,   // H 82° L 64°
+        a0 + t0 + ' ' + a1 + t1,               // H82° L64°
+        a0 + n0 + ' ' + a1 + n1,               // H82 L64
+        a0 + ' ' + t0,                         // H 82°
+        a0 + n0                                // H82
+      ], budgetFor(slotsShowing('hilo'))));
     }
     if (!tOldest || fc.t < tOldest) tOldest = fc.t;
   }
@@ -1689,7 +1725,8 @@ function locationSuccess(rawLat, rawLon, needImage) {
 function composeAndSend(bmRgba, rdRgba, mode, needImage) {
   var r;
   try {
-    r = composite.buildComposite(bmRgba, rdRgba, mode, IMG_W, IMG_H);
+    r = composite.buildComposite(bmRgba, rdRgba, mode, IMG_W, IMG_H,
+                                 WATCH_ROUND !== null);
   } catch (e) {
     console.log('Composite failed: ' + e);   // send nothing; keep the last good frame
     return;
@@ -1910,8 +1947,10 @@ Pebble.addEventListener('ready', function () {
     IMG_W = size[0];
     IMG_H = size[1];
   }
+  WATCH_ROUND = (info && ROUND_PLATFORMS[info.platform]) || null;
   console.log('Imagery size: ' + IMG_W + 'x' + IMG_H +
-              ' (platform ' + ((info && info.platform) || 'unknown') + ')');
+              ' (platform ' + ((info && info.platform) || 'unknown') +
+              (WATCH_ROUND ? ', round' : '') + ')');
   // Resync a lost save through the queue, not a bare sendAppMessage: the
   // weather replay below enqueues in the same tick, and with two sends in
   // flight the bare one's NACK would go unnoticed, leaving the watch's

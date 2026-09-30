@@ -6,7 +6,7 @@ collection per platform. The hero store screenshot goes in a drawn watch frame
 over a backdrop: by default the topo+radar fetch from banner_bg.py, or with
 --style bleed/crisp another store screenshot scaled up.
 
-    uv run --with pillow python screenshots/tools/banner.py            # all three
+    uv run --with pillow python screenshots/tools/banner.py            # every platform
     uv run --with pillow python screenshots/tools/banner.py --style crisp
 
 Run from noaa-us-weather-radar/.
@@ -22,7 +22,10 @@ W, H = 720, 320
 STORE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "store")
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "banner")
 
-FONT_DIR = "/usr/share/fonts/redhat"
+# Fedora's redhat-display-fonts and redhat-text-fonts install here. Without
+# root, extract the two RPMs (`dnf download`, `rpm2cpio | cpio -idm`) and point
+# BANNER_FONT_DIR at the extracted usr/share/fonts/redhat.
+FONT_DIR = os.environ.get("BANNER_FONT_DIR", "/usr/share/fonts/redhat")
 F_BLACK = os.path.join(FONT_DIR, "RedHatDisplay-Black.otf")
 F_BOLD = os.path.join(FONT_DIR, "RedHatDisplay-Bold.otf")
 F_MED = os.path.join(FONT_DIR, "RedHatText-Medium.otf")
@@ -42,6 +45,7 @@ PLATFORMS = {
     "emery": {"shape": "rect", "scale": 1.0, "bezel": (18, 26), "name": "Pebble Time 2"},
     "basalt": {"shape": "rect", "scale": 1.5, "bezel": (18, 26), "name": "Pebble Time"},
     "gabbro": {"shape": "round", "scale": 1.0, "bezel": 14, "name": "Pebble Round 2"},
+    "chalk": {"shape": "round", "scale": 1.5, "bezel": 14, "name": "Pebble Time Round"},
 }
 
 TITLE = ["NOAA US", "WEATHER RADAR"]
@@ -69,7 +73,7 @@ def shot(platform, scene):
 
 def pixel_scale(img, scale):
     """Nearest-neighbour only: any interpolation turns the halo'd slot text to
-    mush. At basalt's 1.5x the uneven pixel split shows on glyph stems but reads
+    mush. At 1.5x the uneven pixel split shows on glyph stems but reads
     sharper than x3-then-box downsampling."""
     if scale == 1.0:
         return img

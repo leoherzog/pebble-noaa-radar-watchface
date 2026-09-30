@@ -55,13 +55,14 @@ python3 "$HERE/seed.py" "$PLATFORM" "$SID" || exit 1
 # First install boots the emulator. Wrap only this one in a timeout: boot
 # occasionally half-fails (qemu alive, pypkjs dead, state file never written)
 # and `pebble install` then waits forever. Children inherit the env.
+BOOTLOG="$LOGDIR/$PLATFORM-$SLUG.boot.log"
 echo "[$PLATFORM/$SLUG] booting..."
-timeout 420 pebble install --emulator "$PLATFORM" --vnc "${SDKARG[@]}" >/dev/null 2>&1
+timeout 420 pebble install --emulator "$PLATFORM" --vnc "${SDKARG[@]}" >"$BOOTLOG" 2>&1
 if [ $? -ne 0 ]; then
-  echo "[$PLATFORM/$SLUG] boot failed, retrying once"
+  echo "[$PLATFORM/$SLUG] boot failed, retrying once (see $BOOTLOG)"
   cleanup
   python3 "$HERE/seed.py" "$PLATFORM" "$SID" >/dev/null || exit 1
-  timeout 420 pebble install --emulator "$PLATFORM" --vnc "${SDKARG[@]}" >/dev/null 2>&1 || {
+  timeout 420 pebble install --emulator "$PLATFORM" --vnc "${SDKARG[@]}" >>"$BOOTLOG" 2>&1 || {
     echo "[$PLATFORM/$SLUG] BOOT FAILED"; cleanup; exit 1; }
 fi
 
@@ -92,6 +93,15 @@ while [ $SECONDS -lt $DEADLINE ]; do
   if grep -q "Decoded composite" "$LOG" 2>/dev/null; then DECODED=1; break; fi
   sleep 3
 done
+# On a relaunch the replayed frame decodes before the phone's fresh
+# `Composite <N> B ... hash <h>` line prints, and that hash is what tells two
+# passes' images apart, so stay attached until it lands too.
+if [ "$DECODED" -eq 1 ]; then
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    grep -q "Composite [0-9]" "$LOG" 2>/dev/null && break
+    sleep 2
+  done
+fi
 kill $LOGPID >/dev/null 2>&1
 
 if [ "$DECODED" -ne 1 ]; then
@@ -112,13 +122,16 @@ sleep 4        # let the frame paint and the text slots settle
 # "--" once watch_now - WX_TIME exceeds 3 h, which a past clock never triggers,
 # and alert expiries stay in the future. Sun slots are the exception: a span
 # starting after the watch's tomorrow renders as a date, so a scenario showing
-# one needs its clock on the capture date.
+# one takes a 'today HH:MM:SS' clock, which lands on the capture date.
 CLOCK=$(python3 -c "
 import json, time
 s=[x for x in json.load(open('$HERE/scenarios.json')) if x['id']==$SID][0]
 c=s.get('clock') or ''
 if c.startswith('now+'):
     print(int(time.time()) + int(c[4:].rstrip('m')) * 60)
+elif c.startswith('today '):
+    print(int(time.mktime(time.strptime(time.strftime('%Y-%m-%d ') + c[6:],
+                                        '%Y-%m-%d %H:%M:%S'))))
 elif c:
     print(int(time.mktime(time.strptime(c, '%Y-%m-%d %H:%M:%S'))))
 ")
@@ -136,4 +149,4 @@ if [ $RC -ne 0 ] || [ ! -s "$OUT" ]; then
   echo "[$PLATFORM/$SLUG] SCREENSHOT FAILED"
   exit 3
 fi
-echo "[$PLATFORM/$SLUG] ok -> $OUT ($(stat -c%s "$OUT") B)"
+echo "[$PLATFORM/$SLUG] ok -> $OUT ($(stat -c%s "$OUT") B, ${SECONDS} s)"

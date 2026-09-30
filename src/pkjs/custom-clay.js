@@ -18,7 +18,37 @@ module.exports = function (minified) {
     return { lat: lat, lon: lon };
   }
 
+  // Clay's capability filter dereferences activeWatchInfo, so on a runtime
+  // that supplies none the first gated item throws and the page never builds.
+  // Keep every platform's items but chalk's instead; the watch still clamps.
+  if (!clayConfig.meta.activeWatchInfo) {
+    (function ungate(items) {
+      for (var i = items.length - 1; i >= 0; i--) {
+        var caps = items[i].capabilities || [];
+        if (caps.indexOf('PLATFORM_CHALK') >= 0) {
+          items.splice(i, 1);
+          continue;
+        }
+        if (caps.indexOf('NOT_PLATFORM_CHALK') >= 0) delete items[i].capabilities;
+        if (items[i].items) ungate(items[i].items);
+      }
+    })(clayConfig.config);
+  }
+
+  // chalk's outer size dropdowns stop at Small. A saved size missing from a
+  // select leaves it blank, and a blank saves as 0 (Extra Small), so show the
+  // size the watch clamps it to: fixed to Small, auto to Small, shrink to fit.
+  var CHALK_OUTER_CLAMP = { '2': '1', '3': '1', '4': '1', '10': '1',
+                            '7': '6', '8': '6', '9': '6', '11': '6' };
+
   clayConfig.on(clayConfig.EVENTS.AFTER_BUILD, function () {
+    var saved = window.claySettings || {};
+    ['TopFont1', 'BottomFont2'].forEach(function (key) {
+      var size = clayConfig.getItemByMessageKey(key);
+      var to = CHALK_OUTER_CLAMP[String(saved[key])];
+      if (size && to && size.get() !== String(saved[key])) size.set(to);
+    });
+
     var gps = clayConfig.getItemByMessageKey('UseGps');
     var loc = clayConfig.getItemByMessageKey('ManualLoc');
     var err = clayConfig.getItemById('ManualLocError');

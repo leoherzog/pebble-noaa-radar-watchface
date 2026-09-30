@@ -4,7 +4,7 @@ Copy and assets for the
 [appstore listing](https://apps.repebble.com/2029ab9c84f946e1b125f8e0): what
 `pebble publish` prompts for, plus the fields the web dashboard
 (`appstore-api.repebble.com/dashboard`) lets you edit afterwards. The full
-description names v1.1.0 features, so it must not go live beside an older build.
+description names v1.2.0 features, so it must not go live beside an older build.
 
 ## App name
 
@@ -44,11 +44,11 @@ over Bluetooth. The watch just draws it.
 - Full-screen live radar over a topographic basemap, with a marker at your position
 - Follows you as you move, or pin it to a fixed latitude and longitude
 - Three zoom levels — City (100 km), State (250 km), or Region (500 km) across the screen
-- Four configurable text lines: time, date, weekday, steps, distance, calories, sleep, heart rate, battery, Bluetooth, radar age, lat/long and more, each with its own size, including shrink-to-fit
+- Four configurable text lines: time, date, weekday, steps, distance, calories, sleep, heart rate, battery, Bluetooth, radar age, lat/long and more, each with its own size from Extra Small up to Super Large, including shrink-to-fit
 - Custom text and outline colors — every line gets a halo so it stays readable over busy map areas
 - National Weather Service weather: current conditions, temperature, feels like, dew point, humidity, wind, pressure, today's forecast, tonight/tomorrow, high/low, and active alerts, in imperial or metric units
 - Sunrise/sunset and the golden hour window, computed for your exact location and shown in your watch's own 12- or 24-hour format
-- Alert-aware lines that show your normal weather until an alert takes over, and clear themselves when the alert expires even if your phone is out of reach
+- Alert-aware lines that show your normal weather until an alert takes over, or count down to one that hasn't started yet, and clear themselves when the alert expires even if your phone is out of reach
 - Severe alerts pushed to your Pebble timeline as pins that last as long as the alert does
 - Translucent, opaque, or radar off entirely — it makes a fine plain topo map face
 - A Bluetooth badge appears the moment your phone goes out of range, so you know the radar has stopped updating
@@ -62,10 +62,10 @@ api.weather.gov — all free, no API keys, no accounts.
 - Coverage is **United States only**. These are US government services; there is
   no imagery or weather outside the country.
 - Needs the Pebble phone app for location, networking, and settings.
-- Works on Pebble Time / Time Steel (basalt), Pebble Time 2 (emery), and
-  Pebble Round 2 (gabbro). Pebble Time Round (chalk) is not supported — its
-  180×180 screen clips the outer text lines and has too little memory to decode a
-  map image during heavy weather.
+- Works on Pebble Time / Time Steel (basalt), Pebble Time Round (chalk),
+  Pebble Time 2 (emery), and Pebble Round 2 (gabbro).
+- On Pebble Time Round, the outermost top and bottom lines go up to Small,
+  because that is where the round screen is narrowest.
 
 ## Category
 
@@ -85,26 +85,26 @@ lightning, hurricane, tornado, precipitation, meteorology
 ## Screenshots
 
 Five scenes, staged in `screenshots/store/` at native resolution for each
-platform — 15 files, since each platform gets its own asset collection. Names
+platform — 20 files, since each platform gets its own asset collection. Names
 are already in the form `pebble publish` requires (the uploader infers the
 platform from everything before the first underscore, so a filename that doesn't
-start with `emery_`, `basalt_` or `gabbro_` is rejected).
+start with `emery_`, `basalt_`, `gabbro_` or `chalk_` is rejected).
 
 | # | Scene | File (per platform) | What it shows |
 |---|---|---|---|
 | 1 | Minneapolis, MN | `<platform>_1_minneapolis-derecho.png` | A derecho west of the Twin Cities, yellow text, weekday / time / date / battery on all four lines |
-| 2 | Washington, DC | `<platform>_2_washington-dc-severe.png` | A line of storms over the Mid-Atlantic at State zoom, 24-hour clock, metric throughout — high/low in °C, wind in km/h with a gust, pressure in mb |
+| 2 | Washington, DC | `<platform>_2_washington-dc-severe.png` | A line of storms over the Mid-Atlantic at State zoom, 24-hour clock, metric throughout — high/low in °C, wind in km/h, pressure in mb |
 | 3 | Dallas, TX | `<platform>_3_dallas-squall-line.png` | Translucent radar over the metroplex with the map showing through, the time at shrink-to-fit above today's forecast |
 | 4 | New Orleans, LA | `<platform>_4_new-orleans-francine.png` | Hurricane Francine's eye at Region zoom, opaque radar, current conditions on top and high/low below |
 | 5 | New York, NY | `<platform>_5_new-york-summer-storm.png` | City zoom over the harbor, dark text on a yellow halo — the inverted color scheme — with the sunrise/sunset span and humidity |
 
 ## Marketing banner
 
-Three, one per platform, in `screenshots/banner/` at exactly **720×320**:
-`emery_banner.png`, `basalt_banner.png`, `gabbro_banner.png`. Each asset
-collection is per-platform, so each gets a banner showing that device — the same
-Minneapolis derecho scene as screenshot 1, in the right body shape at the right
-pixel count.
+Four, one per platform, in `screenshots/banner/` at exactly **720×320**:
+`emery_banner.png`, `basalt_banner.png`, `gabbro_banner.png`,
+`chalk_banner.png`. Each asset collection is per-platform, so each gets a banner
+showing that device — the same Minneapolis derecho scene as screenshot 1, in the
+right body shape at the right pixel count.
 
 Uploaded from the web dashboard; `pebble publish` never asks for a banner, and a
 banner is a store asset rather than a build, so it needs no `version` bump.
@@ -117,9 +117,10 @@ uv run --with pillow python screenshots/tools/banner_bg.py --scenario 11 --span-
 uv run --with pillow python screenshots/tools/banner.py
 ```
 
-- The **watch screen** is a `screenshots/store/` PNG at native pixels — emery and
-  gabbro at 1:1, basalt at 1.5× nearest-neighbour — so the 16-colour composite
-  and the halo'd slot text stay crisp. Nothing is interpolated.
+- The **watch screen** is a `screenshots/store/` PNG at native pixels, enlarged
+  only by nearest-neighbour where `PLATFORMS` in `banner.py` sets a scale above
+  1:1, so the 16-colour composite and the halo'd slot text stay crisp. Nothing
+  is interpolated.
 - The **backdrop** is a real 720×320 USGS topo plus archived NEXRAD fetch of
   the Washington DC scene (scenario 11, widened to a 380 km span), blurred and
   scrimmed. A blown-up screenshot is mush and drags the watch's clock text with
@@ -134,6 +135,20 @@ uv run --with pillow python screenshots/tools/banner.py
 Alternate styles exist behind `--style` (`bleed` and `crisp` build the backdrop
 out of a screenshot, `panel` is flat dark) if the fetched backdrop ever needs to
 be dropped; `HERO`/`BACKDROP` at the top of the script pick the scenes.
+
+## Release notes — v1.2.0
+
+Pebble Time Round support, and a better fit on round screens:
+
+- **Pebble Time Round** — the face runs on Pebble Time Round. Its outermost top and bottom lines go up to Small, where the round screen is narrowest, and a larger size saved for those lines drops to Small
+- **Text stays inside the circle** — on Pebble Time Round and Pebble Round 2, each line fits the width of the screen at its height, shrinking or shortening instead of being cut off by the bezel
+- **Bluetooth badge on round watches** — moves to the left edge of the screen, where the round display can show it
+
+And for every watch:
+
+- **Super Large** — a sixth text size, fixed or shrink-to-fit. A Super Large 12-hour clock uses a one-letter am/pm ("10:00p") so it fits
+- **Alerts, else Upcoming, else Conditions** — a new line option that shows an alert in effect; if none is, it counts down to the most serious one that hasn't started yet ("Flood Watch in 3h"), and failing that shows current conditions
+- **High / Low on narrow lines** — shortens cleanly ("H82° L64°", then just the next high or low) instead of cutting a number off partway
 
 ## Release notes — v1.1.0
 
@@ -160,10 +175,10 @@ And one settings change:
 ## App information
 
 - **Author / company**: Leo Herzog (`companyName` in the built PBW)
-- **Version**: 1.1.0 (`versionLabel`)
+- **Version**: 1.2.0 (`versionLabel`)
 - **UUID**: `6808fb9d-6728-4be3-8e2a-e65cba4e94c6`
 - **Type**: watchface
-- **Platforms**: emery, basalt, gabbro
+- **Platforms**: emery, basalt, gabbro, chalk
 - **License**: MIT
 - **Source URL**: `https://github.com/leoherzog/pebble-noaa-radar-watchface`
 - **Support email**: pebble-radar@herzog.tech

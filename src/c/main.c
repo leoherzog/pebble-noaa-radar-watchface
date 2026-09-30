@@ -29,7 +29,7 @@
 // existing keys, which would silently break the settings write in
 // inbox_received_callback(). The gate keeps the cache off any store it could
 // fill. Where persist_get_max_size() is a literal the comparison folds at
-// compile time and the bodies vanish.
+// compile time and the bodies vanish, as on basalt and chalk.
 #define IMG_META_KEY        3
 #define IMG_DATA_KEY        16
 #define IMG_MAX_KEYS        96                 // 96 * 256 = 24,576 B
@@ -43,20 +43,24 @@
 // A decoded frame is a fullscreen 16-color PNG: 4bpp palettized, rows padded
 // to a byte. The firmware decoder (upng.c upng_decode_image) inflates into one
 // buffer of FRAME_BYTES plus a byte per row, unfilters it in place, and the
-// GBitmap adopts that buffer. A decode therefore costs about one frame plus
-// small transient decoder state; the compressed input is budgeted separately.
-// The rest of DECODE_HEADROOM's 2.5x is slack for allocator overhead and for
-// fragmentation, since the frame buffer is one contiguous block, so the budget
-// is conservative for a 4bpp decode.
+// GBitmap adopts that buffer. Measured on all four platforms, a decode needs
+// FRAME_BYTES + PBL_DISPLAY_HEIGHT + about 1.8 KB of free heap beyond the
+// compressed input, whatever the composite's size. DECODE_HEADROOM's 1.5x
+// leaves the rest of half a frame as slack, thinnest on basalt at about 4 KB.
 //
-// The slack must be proportional, not fixed: heap depth in frames differs by
-// platform, so a multiplier that is free on emery starves the others. gabbro,
-// whose heap holds the fewest frames, is the platform 2.5x has to fit. It
-// fits because only one frame is ever resident: pkjs does the blend, and the
-// resident frame is destroyed before its replacement decodes. That frame is
-// always full-size, even with radar disabled or a clear sky.
+// The measured need is a hard floor: a decode that runs 8 to at least 264 B
+// short faults the app inside the decoder (consistent with tinflate's
+// unchecked code-length malloc); only from about 408 B short does it fail
+// cleanly with a NULL-pixel bitmap. So the header guard is the one thing
+// between a tight heap and a crash, and the need belongs to the firmware's
+// decoder: re-measure it after any SDK change before lowering the multiplier.
+//
+// The budget covers one decode, not two frames, because only one frame is
+// ever resident: pkjs does the blend, and the resident frame is destroyed
+// before its replacement decodes. That frame is always full-size, even with
+// radar disabled or a clear sky.
 #define FRAME_BYTES     (((PBL_DISPLAY_WIDTH + 1) / 2) * PBL_DISPLAY_HEIGHT)
-#define DECODE_HEADROOM (FRAME_BYTES * 5 / 2)
+#define DECODE_HEADROOM (FRAME_BYTES * 3 / 2)
 
 // Display order, top to bottom.
 enum { SLOT_TOP1, SLOT_TOP2, SLOT_BOT1, SLOT_BOT2 };
@@ -181,12 +185,24 @@ static bool slot_font_auto(int i) {
 static uint8_t slot_font(int i) {
   uint8_t f = slot_font_raw(i);
   if (f == 10 || f == 11) {
-    return FONT_SUPER;
+    f = FONT_SUPER;
+  } else {
+    if (f >= 5) {
+      f -= 5;
+    }
+    if (f > 4) {
+      f = 4;
+    }
   }
-  if (f >= 5) {
-    f -= 5;
+#if defined(PBL_PLATFORM_CHALK)
+  // chalk's outer lines sit where the bezel leaves a few characters at Medium
+  // and up. Its settings page offers them only up to Small, but a replayed
+  // config saved for another watch can still carry a larger size.
+  if ((i == SLOT_TOP1 || i == SLOT_BOT2) && f > 1) {
+    f = 1;   // Small; an auto line stays auto under the lower ceiling
   }
-  return f > 4 ? 4 : f;
+#endif
+  return f;
 }
 
 // Font ladder for the size dropdowns: XS..XL, Super Large. FONT_H is the
@@ -209,11 +225,61 @@ static const int8_t FONT_OFF[NUM_FONTS] = {  9, 11, 14, 16, 18, 25 };
 #define TEXT_MARGIN 4
 
 // The band an auto line shrinks inside is fixed by apply_slot_layout() from
-// the ceiling font; only the glyph placement inside it follows the resolved
-// font. s_resolved caches the last placed font per slot so update_slots()
-// re-places only when the resolved size actually changed.
+// the ceiling font; only the glyph placement inside it, and on a round display
+// the frame width, follows the resolved font. s_resolved caches the last
+// placed font per slot so update_slots() re-places only when the resolved size
+// actually changed.
 static int16_t s_band_y[NUM_SLOTS], s_band_h[NUM_SLOTS];
 static uint8_t s_resolved[NUM_SLOTS];
+// Full width the bands span. Set with them by apply_slot_layout(), which
+// main_window_load() runs before update_slots() can get past its
+// s_slot_layers guard.
+static int16_t s_layout_w;
+
+#if defined(PBL_ROUND)
+// First and last rows of glyph ink below the frame top, per ladder font;
+// measured from screenshots.
+static const int8_t FONT_INK_TOP[NUM_FONTS] = {  5,  6, 10, 10,  9, 12 };
+static const int8_t FONT_INK_BOT[NUM_FONTS] = { 15, 20, 27, 31, 34, 48 };
+
+static int32_t isqrt32(int32_t v) {
+  int32_t r = 0;
+  while ((r + 1) * (r + 1) <= v) {
+    r++;
+  }
+  return r;
+}
+
+// Visible width of window row y: the chord of the circle inscribed in the
+// display, rounded down. The display fixes the circle whatever the
+// obstruction. Centred, the chord never reaches a pixel outside the
+// firmware's round mask (display_getafix.c) on chalk or gabbro.
+static int16_t chord_w(int y) {
+  int32_t d = 2 * y - (PBL_DISPLAY_HEIGHT - 1);
+  int32_t v = (int32_t)PBL_DISPLAY_WIDTH * PBL_DISPLAY_WIDTH - d * d;
+  return v > 0 ? (int16_t)isqrt32(v) : 0;
+}
+#endif
+
+// Frame width of slot i drawn in font f. On a round display it is the visible
+// chord at f's ink row nearer the bezel, with f centred in the band as
+// place_slot() draws it, plus TEXT_MARGIN, so the box resolve_font() measures
+// is the chord itself; otherwise, and for a None band, the full width.
+static int16_t slot_width(int i, uint8_t f) {
+#if defined(PBL_ROUND)
+  if (s_band_h[i] > 0) {
+    // Taken at f, not the ceiling, so a line that shrinks gains the width its
+    // smaller glyphs sit in. The chord narrows monotonically away from the
+    // centre row, so the narrowest visible row is one of the ink extremes.
+    int16_t y = s_band_y[i] + (s_band_h[i] - FONT_H[f]) / 2;
+    int16_t a = chord_w(y + FONT_INK_TOP[f]);
+    int16_t c = chord_w(y + FONT_INK_BOT[f]);
+    int16_t w = (a < c ? a : c) + TEXT_MARGIN;
+    return w < s_layout_w ? w : s_layout_w;
+  }
+#endif
+  return s_layout_w;
+}
 
 // Largest ladder step whose text fits the band on one line.
 // Measured with GTextOverflowModeWordWrap, not TrailingEllipsis: the ellipsis
@@ -223,7 +289,7 @@ static uint8_t s_resolved[NUM_SLOTS];
 // line is the failure condition, which also catches a long single word that
 // width alone would not. Needs no GContext, so it is callable from
 // update_slots() outside a render pass.
-static uint8_t resolve_font(int i, const char *s, int16_t band_w) {
+static uint8_t resolve_font(int i, const char *s) {
   uint8_t max = slot_font(i);
   if (!slot_font_auto(i) || !s || !s[0]) {
     // Fixed lines always take their configured size; an empty string resolves
@@ -234,7 +300,7 @@ static uint8_t resolve_font(int i, const char *s, int16_t band_w) {
   for (int f = max; f > 0; f--) {
     GSize sz = graphics_text_layout_get_content_size(
         s, fonts_get_system_font(FONT_KEYS[f]),
-        GRect(0, 0, band_w - TEXT_MARGIN, FONT_H[f] * 2),
+        GRect(0, 0, slot_width(i, f) - TEXT_MARGIN, FONT_H[f] * 2),
         GTextOverflowModeWordWrap, GTextAlignmentCenter);
     if (sz.h <= FONT_H[f]) {
       return f;      // did not need a second line
@@ -246,12 +312,13 @@ static uint8_t resolve_font(int i, const char *s, int16_t band_w) {
 // Vertically centre the resolved font in its fixed band (TextLayer has no
 // vertical centering of its own). place_slot() never consults neighbouring
 // slots, which guarantees a re-size cannot cascade. A None slot keeps its
-// zero-height frame regardless of the resolved font. `w` is the unobstructed
-// width the caller's layout math used.
-static void place_slot(int i, uint8_t f, int16_t w) {
+// zero-height frame regardless of the resolved font.
+static void place_slot(int i, uint8_t f) {
   int16_t h = (slot_kind(i) == SLOT_NONE) ? 0 : FONT_H[f];
+  int16_t w = slot_width(i, f);
   layer_set_frame(text_layer_get_layer(s_slot_layers[i]),
-                  GRect(0, s_band_y[i] + (s_band_h[i] - h) / 2, w, h));
+                  GRect((s_layout_w - w) / 2,
+                        s_band_y[i] + (s_band_h[i] - h) / 2, w, h));
   text_layer_set_font(s_slot_layers[i], fonts_get_system_font(FONT_KEYS[f]));
 }
 
@@ -556,7 +623,6 @@ static void update_slots(void) {
   if (!s_slot_layers[0]) {
     return;   // a tick or config message beat the window load
   }
-  GRect b = layer_get_unobstructed_bounds(window_get_root_layer(s_main_window));
   for (int i = 0; i < NUM_SLOTS; i++) {
     char tmp[sizeof(s_slot_bufs[0])];
     // strftime returns 0 and leaves the buffer's contents unspecified when the
@@ -567,10 +633,10 @@ static void update_slots(void) {
     // to their configured size, so they never re-place.
     if (strcmp(tmp, s_slot_bufs[i]) != 0) {
       strcpy(s_slot_bufs[i], tmp);
-      uint8_t f = resolve_font(i, s_slot_bufs[i], b.size.w);
+      uint8_t f = resolve_font(i, s_slot_bufs[i]);
       if (f != s_resolved[i]) {
         s_resolved[i] = f;
-        place_slot(i, f, b.size.w);   // the band is fixed; only the glyphs move
+        place_slot(i, f);   // the band is fixed; only the glyphs move
       }
       // Inside the branch on purpose: text_layer_set_text() has no equality
       // check (PebbleOS applib/ui/text_layer.c), and its dirty repaints the
@@ -610,7 +676,11 @@ static void apply_slot_layout(void) {
   // full height of its own frame immediately beyond it, so raising either
   // inner line's size pushes its outer neighbour outward rather than
   // overlapping it.
-  int inner_top = b.size.h / 4 - FONT_OFF[f[SLOT_TOP2]];
+  // A round display's Quick View covers only rows below the centre, so its top
+  // half keeps the full display's quarter line; anchored on the unobstructed
+  // height, the top lines would rise to where the circle cuts them short.
+  int top_h = PBL_IF_ROUND_ELSE(PBL_DISPLAY_HEIGHT, b.size.h);
+  int inner_top = top_h / 4 - FONT_OFF[f[SLOT_TOP2]];
   int inner_bot = b.size.h * 3 / 4 - FONT_OFF[f[SLOT_BOT1]];
 
   // A short display may lack room for the outer pair beyond those lines
@@ -651,7 +721,7 @@ static void apply_slot_layout(void) {
   // View). Geometry still depends only on slot kinds and fonts, so the
   // face-never-moves-on-content invariant holds.
   if (slot_kind(SLOT_TOP2) == SLOT_NONE && h[SLOT_TOP1] > 0) {
-    int yy = (b.size.h / 4 - h[SLOT_TOP1]) / 2;
+    int yy = (top_h / 4 - h[SLOT_TOP1]) / 2;
     y[SLOT_TOP1] = yy < 0 ? 0 : yy;
   }
   if (slot_kind(SLOT_BOT1) == SLOT_NONE && h[SLOT_BOT2] > 0) {
@@ -664,13 +734,13 @@ static void apply_slot_layout(void) {
 
   // Bands come from the ceiling font; auto only moves glyphs inside them.
   // Re-resolve against the current strings, since a font or slot change can
-  // alter a ceiling. An obstruction change leaves band width unchanged, so it
-  // amounts to a re-place.
+  // alter a ceiling, and on a round display a band that moves changes width.
+  s_layout_w = b.size.w;
   for (int i = 0; i < NUM_SLOTS; i++) {
     s_band_y[i] = y[i];
     s_band_h[i] = h[i];
-    s_resolved[i] = resolve_font(i, s_slot_bufs[i], b.size.w);
-    place_slot(i, s_resolved[i], b.size.w);
+    s_resolved[i] = resolve_font(i, s_slot_bufs[i]);
+    place_slot(i, s_resolved[i]);
   }
 }
 
@@ -769,7 +839,8 @@ static bool img_cache_available(void) {
 // Cache the PNG the frame now on screen was decoded from. Called at the decode,
 // which is the only point where those bytes exist: s_rx_buf is freed
 // immediately afterwards, and holding a copy resident instead would cost
-// another 8-20 KB of heap on the platform (gabbro) with the least of it.
+// another 8-20 KB of heap on gabbro, the cache platform with the fewest frames
+// of heap.
 static void save_image(const uint8_t *buf, uint32_t len) {
   if (!img_cache_available() || len == 0 || len > IMG_CACHE_MAX_BYTES) {
     return;   // too big to cache is not an error: the frame still displays
@@ -842,9 +913,9 @@ static bool load_image(void) {
     return false;
   }
   // The same budget the header handler applies, for the same reason: a decode
-  // that runs short hands back a GBitmap with a NULL pixel buffer rather than
-  // failing loudly. On emery and gabbro IMG_CACHE_MAX_BYTES keeps a cached
-  // frame inside it, so this is a backstop.
+  // that runs short faults the app or hands back a GBitmap with a NULL pixel
+  // buffer (see DECODE_HEADROOM). On emery and gabbro IMG_CACHE_MAX_BYTES keeps
+  // a cached frame inside it, so this is a backstop.
   if (heap_bytes_free() < m.len + DECODE_HEADROOM) {
     return false;
   }
@@ -1091,14 +1162,17 @@ static void inbox_received_callback(DictionaryIterator *iter, void *ctx) {
     s_rx_total = total_t->value->uint32;
 
     // Reject the impossible, and refuse a transfer we cannot afford to decode.
-    // A decode that runs short fails silently (a GBitmap with a NULL pixel
-    // buffer, checked after the decode below), and by then the frame being
-    // replaced is already destroyed, so the headroom is required up front.
+    // A decode that runs slightly short faults the app, and one that runs
+    // further short fails silently (a GBitmap with a NULL pixel buffer,
+    // checked after the decode below); either way the frame being replaced
+    // is already destroyed, so the headroom is required up front (see
+    // DECODE_HEADROOM).
     // DECODE_HEADROOM is sized for the phone's 4bpp PNG, and nothing here
     // checks bit depth: s_rx_total is the compressed size, so a deeper source
     // passes both clauses even though it inflates to more (about 2x the frame
     // at 8bpp). The NULL-pixel-buffer check and the load_image() restore
-    // behind it contain a decode that runs short.
+    // behind it contain a decode that runs well short, not one that lands in
+    // the crash window.
     // The image being replaced is destroyed before the decode, so its bytes
     // count as available; otherwise every refresh after the first would be
     // refused.
@@ -1113,6 +1187,9 @@ static void inbox_received_callback(DictionaryIterator *iter, void *ctx) {
 
     s_rx_buf = malloc(s_rx_total);
     if (!s_rx_buf) {
+      // Fragmentation can refuse a block the total-free guard above accepted.
+      APP_LOG(APP_LOG_LEVEL_WARNING, "Rx malloc of %d bytes failed (free %d)",
+              (int)s_rx_total, (int)heap_bytes_free());
       s_rx_total = 0;
       return;
     }
@@ -1244,11 +1321,11 @@ static void outbox_failed_callback(DictionaryIterator *iterator,
 // So the rune is drawn from line segments: zero heap, no resource, and it
 // takes the configured text/outline colors.
 //
-// A fixed pixel size rather than a fraction of the display: a corner badge
-// should read the same on every platform.
+// A fixed pixel size rather than a fraction of the display: the badge should
+// read the same on every platform.
 #define BT_HALF   6    // half-width of the rune's flags
 #define BT_HEIGHT 20   // top vertex to bottom vertex
-#define BT_INSET  3    // whole badge, slash overhang included, from the corner
+#define BT_INSET  3    // whole badge, slash overhang included, from the edge
 // Odd values only. An even width is stored as given but drawn one px thicker:
 // prv_adjust_stroked_line_width() in PebbleOS graphics_line.c rounds it up,
 // although the gcontext.h doc says down. 1/3 is also the only legible pair at
@@ -1276,6 +1353,8 @@ static void outbox_failed_callback(DictionaryIterator *iterator,
 // stem at the one place the rune has no detail of its own.
 #define BT_SLASH_HALF 7   // half-width; > BT_HALF, so it sets the badge width
 #define BT_SLASH_OVER 2   // overhang past the rune's top and bottom vertices
+// Rows the slash spans, the badge's tallest part; its halo adds one each side.
+#define BT_BOX_H (BT_HEIGHT + 2 * BT_SLASH_OVER + 1)
 
 // The slash's glyph pass draws red, like the center marker's dot, whatever
 // TextColor is. Its halo stays OutlineColor, so the slash keeps the badge's
@@ -1308,8 +1387,23 @@ static void draw_bt_badge(GContext *ctx, GRect bounds) {
   // The slash is the widest and tallest part of the badge, so BT_INSET is
   // measured from its extents, not the rune's -- otherwise the overhang would
   // hang off the top-left corner of the screen.
-  int16_t cx = bounds.origin.x + BT_INSET + BT_SLASH_HALF;
-  int16_t y0 = bounds.origin.y + BT_INSET + BT_SLASH_OVER;
+  int16_t left = bounds.origin.x + BT_INSET;
+  int16_t top  = bounds.origin.y + BT_INSET;
+#if defined(PBL_ROUND)
+  // A round display has no corner, so the badge sits at 9 o'clock: no text
+  // band occupies mid-height at default sizes, and the centre marker is far
+  // off. BT_INSET then runs from the bezel at the halo's outermost rows, the
+  // narrowest the badge spans.
+  top = bounds.origin.y + (bounds.size.h - BT_BOX_H) / 2;
+  int16_t cw = chord_w(top - 1);
+  int16_t cb = chord_w(top + BT_BOX_H);
+  if (cb < cw) {
+    cw = cb;
+  }
+  left = bounds.origin.x + (bounds.size.w - cw) / 2 + BT_INSET;
+#endif
+  int16_t cx = left + BT_SLASH_HALF;
+  int16_t y0 = top + BT_SLASH_OVER;
   int16_t q  = BT_HEIGHT / 4;
   GPoint p[6], s[2];
   p[0] = GPoint(cx - BT_HALF, y0 + q);
@@ -1365,12 +1459,12 @@ static void map_update_proc(Layer *layer, GContext *ctx) {
   graphics_context_set_fill_color(ctx, GColorRed);
   graphics_fill_circle(ctx, c, 2);
 
-  // 3. Bluetooth badge, top-left, shown only while the phone is unreachable
-  // (the watchface convention). The slash makes it read as "disconnected" on
-  // its own, without relying on that convention. Peeked rather than cached:
-  // connection_callback() dirties this layer, so a render always follows the
-  // state it draws. Drawn before the text pass so an overlapping line wins the
-  // corner.
+  // 3. Bluetooth badge, top-left or at 9 o'clock on a round display, shown
+  // only while the phone is unreachable (the watchface convention). The slash
+  // makes it read as "disconnected" on its own, without relying on that
+  // convention. Peeked rather than cached: connection_callback() dirties this
+  // layer, so a render always follows the state it draws. Drawn before the
+  // text pass so an overlapping line wins the spot.
   if (s_settings.bt_badge && !connection_service_peek_pebble_app_connection()) {
     draw_bt_badge(ctx, bounds);
   }
