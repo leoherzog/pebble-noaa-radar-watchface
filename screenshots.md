@@ -77,12 +77,12 @@ Fonts are XS/S/M/L/XL, a `*` meaning shrink to fit.
 |---|---|---|---|---|---|---|---|---|---|---|
 | 01 | Grand Rapids MI | 2025-08-16 20:45 | City | translucent | Sat 18:42 | 12h | — / Time / Date / — | XL, S | white / black | scattered cells over the city |
 | 02 | Minneapolis MN | 2025-06-29 03:00 | State | opaque | Wed 21:15 | 24h | Weekday / Time / Date / Battery | S, L, S, XS | yellow / black | battery 42%, BT badge on |
-| 03 | New Orleans LA | 2024-09-11 18:20 | Region | opaque | Sun 07:28 | 12h | Conditions / Time / High-Low / — | XS, XL, S | cyan / navy | **Hurricane Francine's eye** |
+| 03 | New Orleans LA | 2024-09-11 18:20 | Region | opaque | Sun 07:28 | 12h | Conditions / Time / Active Alerts / High-Low | XS, XL, M\*, S\* | cyan / navy | **Hurricane Francine's eye**, `Hurricane Warning` |
 | 04 | Oklahoma City OK | 2025-06-26 21:00 | City | opaque | now + 7 min | 24h | Alerts-else-Conditions / Time / Date / Radar Age | XS, L, XS, XS | red / white | supercells; Radar Age reads `7 min` |
 | 05 | Dallas TX | 2025-04-20 03:10 | State | translucent | Thu 16:05 | 12h | — / Time / Forecast / — | L\*, XS | black / white | **shrink-to-fit** font |
 | 06 | Miami FL | 2024-10-09 18:05 | Region | translucent | Mon 12:00 | 12h | — / Time / — / — | XL | magenta / white | single-line minimal, battery 100% |
 | 07 | Denver CO | 2025-06-26 02:55 | City | translucent | Tue 06:50 | 24h | Heart Rate / Time / Steps / Distance | XS, L, XS, XS | green / black | health slots (stubbed, see below) |
-| 08 | Phoenix AZ | 2024-07-26 02:45 | State | opaque | Fri 20:33 | 12h | — / Time / ISO Date / — | XL, M | orange / black | monsoon cells, battery 21% |
+| 08 | Phoenix AZ | 2024-07-26 02:45 | State | opaque | Fri 20:33 | 12h | — / Time / ISO Date / Active Alerts | XL, M, S | orange / black | monsoon cells, battery 21%; `Heat Advisory`, `Heat Adv` on chalk |
 | 09 | Seattle WA | 2024-12-07 17:55 | Region | translucent | Mon 15:20 | 24h | Conditions / Time / Weekday / Bluetooth | XS, L, S, XS | white / dark blue | **metric units**; all-low-dBZ rain |
 | 10 | New York NY | 2025-09-05 03:20 | City | opaque | capture day 09:07 | 12h | — / Time / Sunrise-Sunset / Humidity | XL, M\*, XS | black / yellow | dark-on-light inversion |
 | 11 | Washington DC | 2025-07-31 18:10 | State | opaque | Sat 23:48 | 24h | High-Low / Time / Wind / Pressure | XS, L, XS, XS | white / dark red | metric; battery 15% |
@@ -91,20 +91,21 @@ Fonts are XS/S/M/L/XL, a `*` meaning shrink to fit.
 Coverage of the variety axes: **zoom** City ×5, State ×4, Region ×3 · **radar
 mode** translucent ×6, opaque ×6 · **clock** 12h ×7, 24h ×5 · **line count** 1,
 2, 3 and 4 all present · **units** imperial ×10, metric ×2 · every fixed size
-except Super Large, plus two shrink-to-fit sizes · twelve distinct text/outline
-colour pairs · slot kinds Time, Date, Weekday, ISO Date, Battery, Bluetooth,
-Heart Rate, Steps, Distance, Radar Age, Lat/Long, Current Conditions, Today's
-Forecast, High/Low, Humidity, Wind, Pressure, Sunrise/Sunset and
-Alerts-else-Conditions.
+except Super Large, plus three shrink-to-fit sizes · twelve distinct
+text/outline colour pairs · slot kinds Time, Date, Weekday, ISO Date, Battery,
+Bluetooth, Heart Rate, Steps, Distance, Radar Age, Lat/Long, Current
+Conditions, Today's Forecast, High/Low, Humidity, Wind, Pressure,
+Sunrise/Sunset, Active Alerts and Alerts-else-Conditions.
 
 **The weather strings are pinned, not live and not historical.**
 `api.weather.gov` has no usable archive: `/alerts` retains about a week and
-gridpoint forecasts are current-only. So each of the six weather tiles (03, 04,
-05, 09, 10, 11) carries a `weather` field in `scenarios.json`, recorded once
-from a live fetch at its location, and every platform and every re-capture
-renders the same text. The text is there to show the slots working, not to
-describe the archived storm. [Pinned weather](#pinned-weather) says how it is
-seeded and re-recorded.
+gridpoint forecasts are current-only. So each of the seven weather tiles (03,
+04, 05, 08, 09, 10, 11) carries a hand-written `weather` field in
+`scenarios.json`, and every re-capture renders from the same inputs. Tiles 03
+and 08 are written to suit their scenes, a hurricane at landfall and a desert
+heat wave; the others show the slots working and do not describe the archived
+storm. [Pinned weather](#pinned-weather) says how the field is written and
+seeded.
 
 ## Platform differences
 
@@ -181,34 +182,64 @@ shell". What is specific to this gallery:
 
 ## Pinned weather
 
-A weather tile's `weather` field holds the `wx_obs`, `wx_fcst` and
-`wx_alerts` records its slots read, in exactly the shape `index.js` persists
-them: `t` in epoch milliseconds, values in the API's own units, so the tile's
-`units` setting still converts them. `seed.py` writes each record with `t`
-restamped to seed time, which holds `fetchWeather()` behind its 9-minute
-observation and 59-minute forecast gates for the whole capture, and shifts
-every alert `on` and `ex` by the same amount. It also writes `wx_lkey`,
-without which `fetchWeather()` drops every cache as another place's, and
-`WxPinned` for patch 3. `fetchObs()` tests the station's own timestamp
-against its 2 h window only on a live response and never persists it, so `t`
-is the only stamp to move.
+A weather tile's `weather` field is written by hand, and holds inputs, never
+finished strings. `seed.py` builds the `wx_obs`, `wx_fcst` and `wx_alerts`
+records from it in the shape `index.js` persists them, stamped with the seed
+time, and `assembleWx()` builds every string from those. The tile's `units`
+setting still converts the values, and each platform fits and abbreviates its
+own text. Write only what the tile's slots read:
 
-To re-record a tile, delete its `weather` field and capture it once from the
-patched build; without `WxPinned` every fetch is live. Before the next
-`seed.py` run wipes it, read the records out of the platform's pypkjs store at
-`~/.local/share/pebble-sdk/<sdk-version>/<platform>/localstorage/<app-uuid>`
-and paste them into the field. Keep only what the slots read: `wx_obs` for
-Current Conditions, Temperature, Feels Like, Dew Point, Humidity, Wind,
-Pressure and the alert-else-Conditions slots, `wx_fcst` for the forecast and
-High/Low slots, `wx_alerts` for any alert slot. The records are
-platform-independent, so one capture on any platform serves all four.
+| Field | Feeds | Entry |
+|---|---|---|
+| `obs` | Current Conditions, Temperature, Feels Like, Dew Point, Humidity, Wind, Pressure and the alert-else-Conditions slots | one observation in the API's units: `temp`, `dp`, `hi` and `wc` in °C, `desc`, `rh` in percent, `ws` and `wg` in km/h, `wd` in degrees, `pr` in Pa |
+| `fcst` | the forecast and High/Low slots | the first two forecast periods in order, each `n` (its name), `d` (true for a daytime period), `t` in °F and `s` (the short forecast) |
+| `alerts` | every alert slot | a list of alerts, each `e` (the event name) and `sv` (Extreme, Severe, Moderate or Minor), plus optionally `ur`, `on` and `ex` |
+
+```json
+"weather": {
+  "obs": { "temp": 26, "desc": "Rain", "ws": 56, "wd": 70, "wg": 93 },
+  "fcst": [
+    { "n": "Today", "d": true, "t": 82, "s": "Hurricane Conditions" },
+    { "n": "Tonight", "d": false, "t": 74, "s": "Tropical Storm Conditions" }
+  ],
+  "alerts": [
+    { "e": "Hurricane Warning", "sv": "Extreme" },
+    { "e": "Flood Watch", "sv": "Severe", "ur": "Future", "on": "+3h", "ex": "+2d" }
+  ]
+}
+```
+
+- **An `obs` key left out is seeded as `null`**, which is what a station that
+  drops the field leaves, and its slot reads `--`.
+- **High/Low labels the periods in order**, so a daytime first period reads
+  `H 82° L 74°` and a night one `L 74° H 82°`.
+- **Alert times are offsets from the seed time**: `-1h`, `+45m`, `+2d`. `on`
+  defaults to `-1h` and `ex` to `+6h`, an alert in effect with hours left. A
+  future `on` makes the alert upcoming: Active Alerts leaves it out, and
+  Alerts + Upcoming shows it with its lead time, `Flood Watch in 3h`, when it
+  ranks first. `null` means no onset or no expiry.
+- **`sv` and `ur` rank the alerts** as `WX_SEV` and `WX_URG` do in `index.js`,
+  and a line shows the top one's name, with `+n` for the rest. `ur` is
+  Immediate, Expected or Future, and defaults to Expected.
+- **`"alerts": []` pins no alert**, which is how tile 04's
+  Alerts-else-Conditions line shows its conditions.
+- **`seed.py` exits on a key or word it does not know**, before it wipes the
+  store.
+
+`seed.py` also writes `WxPinned`, and patch 3 then sends the assembled payload
+on every heartbeat and fetches nothing. A slot whose field is missing
+therefore reads `--`, or nothing for an alert slot, instead of going to NWS.
+The phone decides in effect or upcoming on its own clock; the watch only
+clears an alert once its own clock passes `ex`, so a tile clock set forwards
+must stay short of it.
 
 The phone fits each string to the display only when it assembles the payload,
-so one record can still abbreviate differently per platform. basalt uses the
-144 px table on every line and chalk on its inner lines, chalk's outer lines
-cap at Small, and gabbro's outer lines have their own table
-(`ROUND_PLATFORMS` in `index.js`). After a capture, `wx_payload` in the same
-store holds the strings the phone sent.
+so one input can abbreviate differently per platform. basalt uses the 144 px
+table on every line and chalk on its inner lines, chalk's outer lines cap at
+Small, and gabbro's outer lines have their own table (`ROUND_PLATFORMS` in
+`index.js`). After a capture, `wx_payload` in the platform's pypkjs store at
+`~/.local/share/pebble-sdk/<sdk-version>/<platform>/localstorage/<app-uuid>`
+holds the strings the phone sent.
 
 Tile 10's sun span is not pinned. The phone computes it from its own clock,
 so it rolls to the next day's pair at New York's sunset; capture all four
@@ -254,18 +285,17 @@ which would otherwise report a false positive. Insert at the top of
   }
 ```
 
-**3. `src/pkjs/index.js`** — serve the seeded alerts. `/alerts/active` is
-refetched on every heartbeat with no interval gate, so a seeded `wx_alerts`
-would be overwritten by live alerts. Add as the first line of
-`fetchAlerts()`:
+**3. `src/pkjs/index.js`** — send the seeded weather and fetch nothing. Add as
+the first line of `fetchWeather()`:
 
 ```js
-  if (localStorage.getItem('WxPinned')) { cb(); return; }
+  if (localStorage.getItem('WxPinned')) { sendWx(assembleWx(lat, lon)); return; }
 ```
 
 `seed.py` sets `WxPinned` only for a scenario with a `weather` field. The
-early return also skips the timeline push, which the emulator cannot deliver
-anyway.
+early return skips every NWS request, so no interval gate, location change or
+live alert can replace a seeded record. It also skips the timeline push, which
+the emulator cannot deliver anyway.
 
 Then `pebble build`, and:
 
@@ -302,10 +332,12 @@ uv run --with pillow python screenshots/tools/contact.py <platform>
 - `screenshots/tools/scenarios.json` — the twelve tiles plus the two diff gates
   below: location, radar timestamp, zoom, mode, units, battery, clock, the full
   `cfg2` blob, each tile's per-platform composite under `verify`, and the
-  weather tiles' pinned records under `weather`. A clock is
+  weather tiles' hand-written inputs under `weather`
+  ([Pinned weather](#pinned-weather)). A clock is
   `YYYY-MM-DD HH:MM:SS`, `today HH:MM:SS` (the capture date) or `now+<N>m`.
 - `screenshots/tools/seed.py` — writes one scenario into a platform's pypkjs
-  `dbm.dumb` localStorage (`cfg2`, the phone-side keys and any pinned weather),
+  `dbm.dumb` localStorage (`cfg2`, the phone-side keys, and the weather
+  records it builds from a `weather` field and stamps with the seed time),
   after wiping `qemu_spi_flash.bin` and the whole localstorage directory. Both
   the seeding format and why the wipe is mandatory rather than hygiene are in
   CLAUDE.md. It does not write `TimelineAlerts`, so every tile runs at that
@@ -342,12 +374,18 @@ uv run --with pillow python screenshots/tools/contact.py <platform>
   still gets through, since on some platforms the drop ends the session.
 - `screenshots/tools/banner.py` and `banner_bg.py` — the 720×320 appstore
   marketing banners in `screenshots/banner/`, one per platform. No emulator
-  involved: the watch screen is a `screenshots/store/` PNG at native pixels and
-  the backdrop is a plain topo+radar fetch at banner size. Rationale and the
-  build command are in `STORE.md` under Marketing banner. `screenshots/store/`
-  holds renamed copies of gallery tiles 02, 11, 05, 03 and 10 for each
-  platform, 20 files; after re-capturing any of those, re-copy it and re-run
-  `banner.py`, which reads the store files.
+  involved: the watch screen is a `screenshots/store/` PNG at native pixels,
+  the watch around it is the Pebble developer site's device frame, read from
+  `reference/sdk-docs`, and the backdrop is a plain topo+radar fetch at banner
+  size. Rationale and the build command are in `STORE.md` under Marketing
+  banner. `screenshots/store/` holds renamed copies of gallery tiles 02, 11,
+  05, 03 and 10 for each platform, 20 files; after re-capturing any of those,
+  re-copy it and re-run `banner.py`, which reads the store files.
+- `screenshots/tools/icon.py`: the 80×80 and 144×144 appstore icons in
+  `screenshots/icon/`. No emulator involved: one pinned topo and archived-radar
+  scene, fetched at eight times each icon's size, with the radar cut to flat
+  tiers and the centre marker drawn in the eye. Rationale and the build command
+  are in `STORE.md` under Icons.
 
 **Two scenarios are diff gates rather than gallery tiles.** 13
 (`autofont-deterministic`) puts three of four slots on auto fonts with every

@@ -76,8 +76,37 @@ the Rebble portal takes neither a category nor app icons for them.
 
 ## Icons
 
-Not required. The 80×80 / 144×144 icon prompts in `pebble publish` are
-watchapp-only.
+`screenshots/icon/icon_80x80.png` is the Small Icon and
+`screenshots/icon/icon_144x144.png` the Large Icon, both uploaded under App
+Icons in the web dashboard. `pebble publish` asks for icons only while creating
+a watchapp, so it never prompts for these.
+
+Icons are optional for a watchface, and both sizes are recommendations. The
+store keeps whatever file it is given, PNG, GIF or JPEG, with or without alpha,
+and serves it as `list_image` in its API. The web store shows a face's icon
+only where the listing has no screenshot; the listing page and the Pebble phone
+app show icons for watchapps alone. Where the web store shows an icon it rounds
+the corners and draws the border itself, so both files are opaque full-bleed
+squares.
+
+Built by `screenshots/tools/icon.py`:
+
+```sh
+uv run --with pillow --with numpy python screenshots/tools/icon.py
+```
+
+- The **scene** is Hurricane Ian's eye off Cayo Costa at 2022-09-28 17:45Z,
+  175 km across: USGS topo under archived NEXRAD, the gallery's two sources.
+  The radar frame is pinned, so a re-run differs only when the basemap has been
+  re-rendered.
+- The **radar** is smoothed and cut to four flat tiers, so the storm reads as
+  one shape at 80 px, where a scaled screenshot is mud. Rain below the lowest
+  tier is left out, which shows the map between the rainbands.
+- The **marker** is the face's white ring and red dot, enlarged, in the eye.
+- Each size is fetched at eight times its pixels and box-averaged down. Neither
+  is scaled from the other.
+- The tiers are classic NWS colours at floors picked for the icon. They are not
+  a legend, and not the shipped MRMS ramp.
 
 ## Keywords
 
@@ -97,7 +126,7 @@ start with `emery_`, `basalt_`, `gabbro_` or `chalk_` is rejected).
 | 1 | Minneapolis, MN | `<platform>_1_minneapolis-derecho.png` | A derecho west of the Twin Cities, yellow text, weekday / time / date / battery on all four lines |
 | 2 | Washington, DC | `<platform>_2_washington-dc-severe.png` | A line of storms over the Mid-Atlantic at State zoom, 24-hour clock, metric throughout — high/low in °C, wind in km/h, pressure in mb |
 | 3 | Dallas, TX | `<platform>_3_dallas-squall-line.png` | Translucent radar over the metroplex with the map showing through, the time at shrink-to-fit above today's forecast |
-| 4 | New Orleans, LA | `<platform>_4_new-orleans-francine.png` | Hurricane Francine's eye at Region zoom, opaque radar, current conditions on top and high/low below |
+| 4 | New Orleans, LA | `<platform>_4_new-orleans-francine.png` | Hurricane Francine's eye at Region zoom, opaque radar, current conditions on top, a Hurricane Warning and high/low below |
 | 5 | New York, NY | `<platform>_5_new-york-summer-storm.png` | City zoom over the harbor, dark text on a yellow halo — the inverted color scheme — with the sunrise/sunset span and humidity |
 
 ## Marketing banner
@@ -105,24 +134,41 @@ start with `emery_`, `basalt_`, `gabbro_` or `chalk_` is rejected).
 Four, one per platform, in `screenshots/banner/` at exactly **720×320**:
 `emery_banner.png`, `basalt_banner.png`, `gabbro_banner.png`,
 `chalk_banner.png`. Each asset collection is per-platform, so each gets a banner
-showing that device — the same Minneapolis derecho scene as screenshot 1, in the
-right body shape at the right pixel count.
+showing that device: the same Minneapolis derecho scene as screenshot 1, on that
+watch's own frame at its own pixel count.
 
 Uploaded from the web dashboard; `pebble publish` never asks for a banner, and a
 banner is a store asset rather than a build, so it needs no `version` bump.
 
 Built by `screenshots/tools/banner.py` from assets already in the repo, plus one
-fetched backdrop:
+fetched backdrop and the device frames in the `reference/sdk-docs` checkout:
 
 ```sh
 uv run --with pillow python screenshots/tools/banner_bg.py --scenario 11 --span-km 380
-uv run --with pillow python screenshots/tools/banner.py
+uv run --with pillow --with resvg-py python screenshots/tools/banner.py
 ```
 
-- The **watch screen** is a `screenshots/store/` PNG at native pixels, enlarged
-  only by nearest-neighbour where `PLATFORMS` in `banner.py` sets a scale above
-  1:1, so the 16-colour composite and the halo'd slot text stay crisp. Nothing
-  is interpolated.
+- The **watch** is the device artwork the Pebble developer site frames its own
+  screenshots in: the SVGs in `reference/sdk-docs` under
+  `source/assets/images/pebbles/`, served at
+  `https://developer.repebble.com/assets/images/pebbles/<frame>.svg`. They are
+  not copied into this repo, and `BANNER_FRAME_DIR` points `banner.py` at
+  another directory. `PLATFORMS` names one frame per platform:
+  `core-time2-red`, `pebble-time-white`, `core-time-round2-rosegold-14` and
+  `pebble-time-round-red-14`. Any other `FRAMES` key for the same watch swaps
+  the colour. Rasterize with `resvg-py`: `cairosvg` drops a button from the
+  Time 2 frame and misdraws the Time Round's glass.
+- The **watch screen** is a `screenshots/store/` PNG at native pixels, 1:1 on
+  every platform, so the 16-colour composite and the halo'd slot text stay
+  crisp. Nothing is interpolated. The frames are drawn in screen pixels, so the
+  screenshot lands on the glass unscaled, at the origin `FRAMES` holds for each
+  frame: the display centred on the frame's glass. A round capture keeps the
+  display mask it carries as alpha.
+- A frame is taller than the banner, so the straps run off the top and bottom
+  edges. The Pebble Time 2 body alone is 366 px at 1:1, so that watch sits low,
+  with its top lugs and strap in view and its lower edge off the banner. The
+  other three show the whole case, and the Round 2's lug tips run off with its
+  strap.
 - The **backdrop** is a real 720×320 USGS topo plus archived NEXRAD fetch of
   the Washington DC scene (scenario 11, widened to a 380 km span), blurred and
   scrimmed. A blown-up screenshot is mush and drags the watch's clock text with
@@ -140,7 +186,7 @@ be dropped; `HERO`/`BACKDROP` at the top of the script pick the scenes.
 
 ## Release notes — v1.2.0
 
-Pebble Time Round support, and a better fit on round screens:
+Pebble Time Round (chalk) support, and a better fit on round screens:
 
 - **Pebble Time Round** — the face runs on Pebble Time Round. Its outermost top and bottom lines go up to Small, where the round screen is narrowest, and a larger size saved for those lines drops to Small
 - **Text stays inside the circle** — on Pebble Time Round and Pebble Round 2, each line fits the width of the screen at its height, shrinking or shortening instead of being cut off by the bezel
@@ -152,8 +198,8 @@ And for every watch:
 - **Alerts, else Upcoming, else Conditions** — a new line option that shows an alert in effect; if none is, it counts down to the most serious one that hasn't started yet ("Flood Watch in 3h"), and failing that shows current conditions
 - **High / Low on narrow lines** — shortens cleanly ("H82° L64°", then just the next high or low) instead of cutting a number off partway
 - **Follows Text Size on a fresh install** — if the watch's Text Size is set to Larger, the time starts at Super Large and, on Pebble Time 2 and Pebble Round 2, the date at Extra Large. Installs that already have settings are not changed
-- **Watch and warning colors** — a severe alert's timeline card is yellow for a watch and red for a warning. Needs Pebble app 1.14.0.1 or newer
-- **Timeline pins for long alerts** — a pin for an alert longer than a day now stays until the alert ends, instead of dropping off after 24 hours
+- **Watch and warning colors** — a severe alert's timeline card is yellow for a watch and red for a warning. Requires Pebble app 1.14.0.1 or newer.
+- **Bugfix for Timeline pins** — a pin for an alert longer than a day now stays until the alert ends, instead of dropping off after 24 hours
 
 ## Release notes — v1.1.0
 

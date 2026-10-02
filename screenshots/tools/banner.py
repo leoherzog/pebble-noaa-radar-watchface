@@ -2,25 +2,35 @@
 """Build 720x320 appstore marketing banners from the staged store screenshots.
 
 One banner per platform, since the Pebble/Rebble portals keep a separate asset
-collection per platform. The hero store screenshot goes in a drawn watch frame
-over a backdrop: by default the topo+radar fetch from banner_bg.py, or with
---style bleed/crisp another store screenshot scaled up.
+collection per platform. The hero store screenshot goes on the glass of the
+Pebble developer site's device artwork, over a backdrop: by default the
+topo+radar fetch from banner_bg.py, or with --style bleed/crisp another store
+screenshot scaled up.
 
-    uv run --with pillow python screenshots/tools/banner.py            # every platform
-    uv run --with pillow python screenshots/tools/banner.py --style crisp
+    uv run --with pillow --with resvg-py python screenshots/tools/banner.py
+    uv run --with pillow --with resvg-py python screenshots/tools/banner.py --style crisp
 
 Run from noaa-us-weather-radar/.
 """
 
 import argparse
+import io
 import os
 
+import resvg_py
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 W, H = 720, 320
 
-STORE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "store")
-OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "banner")
+HERE = os.path.dirname(os.path.abspath(__file__))
+STORE = os.path.join(HERE, "..", "store")
+OUT = os.path.join(HERE, "..", "banner")
+
+# The device artwork is not kept in this repo. It is read from the sdk-docs
+# checkout beside the project, or from BANNER_FRAME_DIR.
+FRAME_DIR = os.environ.get("BANNER_FRAME_DIR", os.path.join(
+    HERE, "..", "..", "..", "reference", "sdk-docs", "source", "assets", "images", "pebbles"))
+FRAME_URL = "https://developer.repebble.com/assets/images/pebbles/%s.svg"
 
 # Fedora's redhat-display-fonts and redhat-text-fonts install here. Without
 # root, extract the two RPMs (`dnf download`, `rpm2cpio | cpio -idm`) and point
@@ -38,14 +48,35 @@ HERO = "1_minneapolis-derecho"
 BACKDROP = "2_washington-dc-severe"
 DEFAULT_BG = "washington-dc-severe"   # scenario 11, fetched by banner_bg.py
 
-# shape:  how the display and the body are drawn
-# scale:  nearest-neighbour pixel scale for the screenshot
-# bezel:  body inset around the display, (x, y) for rect / single value for round
+# Device frames by file stem, each with the display's top-left corner in frame
+# pixels. The artwork is drawn in screen pixels, so at 1:1 the screenshot lands
+# on the glass unscaled, and the origin centres it there.
+FRAMES = {
+    "core-time2-red": (47, 102),
+    "core-time2-blue": (47, 102),
+    "pebble-time-white": (62, 117),
+    "pebble-time-black": (62, 117),
+    "pebble-time-red": (62, 117),
+    "core-time-round2-black-20": (36, 100),
+    "core-time-round2-rosegold-14": (36, 100),
+    "pebble-time-round-black-20": (55, 123),
+    "pebble-time-round-red-14": (56, 123),
+}
+
+# frame:    a FRAMES key, the colour to swap
+# cx, cy:   banner position of the frame's centre. Straps run off the top and
+#           bottom edges. The Time 2 body is taller than the banner, so it sits
+#           low: top lugs and strap in view, the lower glass running off.
+# title_w:  widest the title may set before it meets the watch
 PLATFORMS = {
-    "emery": {"shape": "rect", "scale": 1.0, "bezel": (18, 26), "name": "Pebble Time 2"},
-    "basalt": {"shape": "rect", "scale": 1.5, "bezel": (18, 26), "name": "Pebble Time"},
-    "gabbro": {"shape": "round", "scale": 1.0, "bezel": 14, "name": "Pebble Round 2"},
-    "chalk": {"shape": "round", "scale": 1.5, "bezel": 14, "name": "Pebble Time Round"},
+    "emery": {"frame": "core-time2-red", "cx": 561, "cy": 188, "title_w": 354,
+              "name": "Pebble Time 2"},
+    "basalt": {"frame": "pebble-time-white", "cx": 572, "cy": 160, "title_w": 366,
+               "name": "Pebble Time"},
+    "gabbro": {"frame": "core-time-round2-rosegold-14", "cx": 548, "cy": 160, "title_w": 318,
+               "name": "Pebble Round 2"},
+    "chalk": {"frame": "pebble-time-round-red-14", "cx": 562, "cy": 160, "title_w": 354,
+              "name": "Pebble Time Round"},
 }
 
 TITLE = ["NOAA US", "WEATHER RADAR"]
@@ -55,9 +86,6 @@ FOOTER = "NOAA · National Weather Service · USGS · United States only"
 INK = (255, 255, 255)
 DIM = (198, 207, 218)
 FAINT = (139, 148, 161)
-BODY = (38, 40, 45)
-BODY_EDGE = (66, 70, 78)
-STRAP = (30, 32, 36)
 
 # NWS-ish reflectivity ramp, used as a thin accent rule under the title.
 RAMP = [
@@ -71,92 +99,31 @@ def shot(platform, scene):
     return Image.open(os.path.join(STORE, "%s_%s.png" % (platform, scene))).convert("RGBA")
 
 
-def pixel_scale(img, scale):
-    """Nearest-neighbour only: any interpolation turns the halo'd slot text to
-    mush. At 1.5x the uneven pixel split shows on glyph stems but reads
-    sharper than x3-then-box downsampling."""
-    if scale == 1.0:
-        return img
-    return img.resize((int(img.width * scale), int(img.height * scale)), Image.NEAREST)
-
-
-def round_mask(size):
-    m = Image.new("L", (size * 4, size * 4), 0)
-    ImageDraw.Draw(m).ellipse((0, 0, size * 4 - 1, size * 4 - 1), fill=255)
-    return m.resize((size, size), Image.LANCZOS)
-
-
-def rounded_mask(w, h, r):
-    m = Image.new("L", (w * 4, h * 4), 0)
-    ImageDraw.Draw(m).rounded_rectangle((0, 0, w * 4 - 1, h * 4 - 1), radius=r * 4, fill=255)
-    return m.resize((w, h), Image.LANCZOS)
+def frame(name):
+    """Rasterize a device frame at 1:1. Returns RGBA."""
+    path = os.path.join(FRAME_DIR, name + ".svg")
+    if not os.path.exists(path):
+        raise SystemExit("no frame at %s -- save %s there, or point BANNER_FRAME_DIR "
+                         "at a directory that has it" % (path, FRAME_URL % name))
+    return Image.open(io.BytesIO(resvg_py.svg_to_bytes(svg_path=path))).convert("RGBA")
 
 
 def watch(platform):
-    """Draw the device: straps, body, bezel highlight, screen. Returns RGBA."""
-    cfg = PLATFORMS[platform]
-    screen = pixel_scale(shot(platform, HERO), cfg["scale"])
-    sw, sh = screen.size
+    """The device: its frame with the hero screenshot on the glass, over a drop
+    shadow. Returns RGBA, the frame centred in it."""
+    name = PLATFORMS[platform]["frame"]
+    card = frame(name)
+    # The screenshot goes on at native pixels and is never resampled: any
+    # interpolation turns the halo'd slot text to mush. A round capture
+    # carries the display's own mask as alpha.
+    card.alpha_composite(shot(platform, HERO), FRAMES[name])
 
-    if cfg["shape"] == "round":
-        b = cfg["bezel"]
-        bw = bh = sw + b * 2
-        radius = bw // 2
-    else:
-        bx, by = cfg["bezel"]
-        bw, bh = sw + bx * 2, sh + by * 2
-        radius = 26
-
-    pad = 60  # room for straps and the shadow
-    card = Image.new("RGBA", (bw + pad * 2, bh + pad * 2), (0, 0, 0, 0))
-    d = ImageDraw.Draw(card)
-    x0, y0 = pad, pad
-
-    # Straps, drawn first so the body sits on top of them. Tapered, and on the
-    # round body they start well inside the circle -- a straight bar the full
-    # width of the lug would poke out past the bezel where the circle narrows.
-    frac = 0.60 if cfg["shape"] == "rect" else 0.46
-    strap_w = int(bw * frac)
-    sx = x0 + (bw - strap_w) // 2
-    tap = int(strap_w * 0.10)
-    inset = 40 if cfg["shape"] == "rect" else int(bh * 0.16)
-    d.polygon([(sx, y0 + inset), (sx + strap_w, y0 + inset),
-               (sx + strap_w - tap, 0), (sx + tap, 0)], fill=STRAP)
-    d.polygon([(sx, y0 + bh - inset), (sx + strap_w, y0 + bh - inset),
-               (sx + strap_w - tap, card.height - 1), (sx + tap, card.height - 1)], fill=STRAP)
-
-    # body
-    if cfg["shape"] == "round":
-        d.ellipse((x0, y0, x0 + bw - 1, y0 + bh - 1), fill=BODY, outline=BODY_EDGE, width=2)
-    else:
-        d.rounded_rectangle((x0, y0, x0 + bw - 1, y0 + bh - 1), radius=radius,
-                            fill=BODY, outline=BODY_EDGE, width=2)
-        # side buttons
-        d.rounded_rectangle((x0 + bw - 3, y0 + bh // 2 - 26, x0 + bw + 4, y0 + bh // 2 + 26),
-                            radius=4, fill=BODY_EDGE)
-        d.rounded_rectangle((x0 - 5, y0 + bh // 2 - 14, x0 + 2, y0 + bh // 2 + 14),
-                            radius=4, fill=BODY_EDGE)
-
-    # screen
-    px, py = x0 + (bw - sw) // 2, y0 + (bh - sh) // 2
-    if cfg["shape"] == "round":
-        screen.putalpha(round_mask(sw))
-    else:
-        screen.putalpha(rounded_mask(sw, sh, 6))
-    card.alpha_composite(screen, (px, py))
-
-    # drop shadow, from the body silhouette only
-    sil = Image.new("L", card.size, 0)
-    ds = ImageDraw.Draw(sil)
-    if cfg["shape"] == "round":
-        ds.ellipse((x0, y0, x0 + bw - 1, y0 + bh - 1), fill=190)
-    else:
-        ds.rounded_rectangle((x0, y0, x0 + bw - 1, y0 + bh - 1), radius=radius, fill=190)
-    shadow = Image.new("RGBA", card.size, (0, 0, 0, 0))
-    shadow.putalpha(sil.filter(ImageFilter.GaussianBlur(14)))
-    out = Image.new("RGBA", card.size, (0, 0, 0, 0))
-    out.alpha_composite(shadow, (0, 10))
-    out.alpha_composite(card)
+    pad = 40  # room for the shadow
+    out = Image.new("RGBA", (card.width + pad * 2, card.height + pad * 2), (0, 0, 0, 0))
+    sil = Image.new("L", out.size, 0)
+    sil.paste(card.getchannel("A").point(lambda a: a * 190 // 255), (pad, pad + 10))
+    out.putalpha(sil.filter(ImageFilter.GaussianBlur(14)))
+    out.alpha_composite(card, (pad, pad))
     return out
 
 
@@ -225,14 +192,10 @@ def build(platform, style, bg_path=None):
     img = backdrop(platform, style, bg_path)
 
     w = watch(platform)
-    cx = 548 if cfg["shape"] == "rect" else 556
-    img.alpha_composite(w, (cx - w.width // 2, H // 2 - w.height // 2))
+    img.alpha_composite(w, (cfg["cx"] - w.width // 2, cfg["cy"] - w.height // 2))
 
     d = ImageDraw.Draw(img)
     x = 48
-    # the round body reaches further left than the rectangular ones, so the
-    # title has to give it room or "RADAR" runs into the bezel
-    max_w = 366 if cfg["shape"] == "rect" else 336
 
     # kicker
     f_kick = ImageFont.truetype(F_SEMI, 13)
@@ -245,13 +208,13 @@ def build(platform, style, bg_path=None):
     sd = ImageDraw.Draw(shade)
     yy = y
     for line in TITLE:
-        f = fit(line, F_BLACK, 45, max_w)
+        f = fit(line, F_BLACK, 45, cfg["title_w"])
         sd.text((x, yy + 2), line, font=f, fill=(6, 8, 12, 170))
         yy += 46
     img.alpha_composite(shade.filter(ImageFilter.GaussianBlur(7)))
     d = ImageDraw.Draw(img)
     for line in TITLE:
-        f = fit(line, F_BLACK, 45, max_w)
+        f = fit(line, F_BLACK, 45, cfg["title_w"])
         d.text((x, y), line, font=f, fill=INK)
         y += 46
 
