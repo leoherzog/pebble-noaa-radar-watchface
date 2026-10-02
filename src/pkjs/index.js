@@ -230,8 +230,8 @@ var CHUNK = 4096;      // the inbox is 8200 B on all four platforms; the
 //   {kind: 'msg', dict: {...}}             — one whole AppMessage
 // The chunked protocol depends on strictly ordered ACKs, and firing an
 // unrelated sendAppMessage mid-transfer risks a NACK on the chunk in flight,
-// so every other AppMessage (settings, weather, Lat/Lon, RADAR_TIME) must go
-// through this same queue as a msg item.
+// so every other AppMessage (settings, weather, Lat/Lon, RADAR_TIME, the size
+// query) must go through this same queue as a msg item.
 var tx = null;         // current item (+ offset/pending/retries while sending)
 var queue = [];        // pending items, in the order the work became ready
 var gen = 0;           // bumped when the bbox moves; stale fetches drop out
@@ -1819,11 +1819,81 @@ function getLocation(needImage) {
 }
 
 // ---------------------------------------------------------------------------
+// First-run sizes
+// ---------------------------------------------------------------------------
+
+// Until the first Save the watch owns the four line sizes (load_settings() in
+// main.c). REQUEST_FONTS asks for them, the watch answers with the four font
+// keys, and the answer goes into Clay's store, which the settings page reads.
+var FONT_KEYS = ['TopFont1', 'TopFont', 'BottomFont', 'BottomFont2'];
+// How long a settings page waits for that answer. The Pebble app gives
+// openURL 10 s from showConfiguration.
+var SIZE_WAIT_MS = 3000;
+// True once the watch has answered this session, or one page has opened
+// without an answer. Later opens never wait.
+var sizesSettled = false;
+// showConfiguration events waiting on the answer. Each gets its own openURL:
+// the Pebble app holds every request open until a URL arrives for it.
+var pendingOpens = 0;
+
+function requestFonts() {
+  enqueue({ kind: 'msg', dict: { 'REQUEST_FONTS': 1 } });
+}
+
+function openConfig() {
+  Pebble.openURL(clay.generateUrl());
+}
+
+function settleSizes() {
+  sizesSettled = true;
+  var n = pendingOpens;
+  pendingOpens = 0;
+  while (n-- > 0) openConfig();
+}
+
+// The watch's answer. cfg2 means a Save has happened and the phone owns the
+// sizes, so a late answer is dropped. Never write cfg2 from here: it would
+// replay as a saved config, to a second watch too.
+function onWatchFonts(p) {
+  if (!localStorage.getItem('cfg2')) {
+    var sizes = {};
+    FONT_KEYS.forEach(function (k) {
+      // Strings, as a Save stores a select's value.
+      if (p[k] !== undefined) sizes[k] = String(p[k]);
+    });
+    try {
+      clay.setSettings(sizes);
+      console.log('Watch sizes ' + FONT_KEYS.map(function (k) {
+        return sizes[k];
+      }).join(',') + ' -> settings page');
+    } catch (e) {
+      console.log('Watch sizes not stored: ' + e);
+    }
+  }
+  settleSizes();
+}
+
+// ---------------------------------------------------------------------------
 // Pebble events
 // ---------------------------------------------------------------------------
 
 Pebble.addEventListener('showConfiguration', function () {
-  Pebble.openURL(clay.generateUrl());
+  if (sizesSettled || localStorage.getItem('cfg2')) {
+    openConfig();
+    return;
+  }
+  // The Pebble app can fire this straight after 'ready', before the watch has
+  // answered, and a page built now would save default sizes over a face that
+  // started larger. Ask again, in case the first request was lost.
+  pendingOpens++;
+  if (pendingOpens > 1) return;   // the first request's query and timer serve it
+  // Armed before the query, so a send that throws cannot cost the page.
+  setTimeout(function () {
+    if (sizesSettled) return;
+    console.log('Watch sizes not received, opening settings without them');
+    settleSizes();
+  }, SIZE_WAIT_MS);
+  requestFonts();
 });
 
 Pebble.addEventListener('webviewclosed', function (e) {
@@ -1976,6 +2046,10 @@ Pebble.addEventListener('ready', function () {
   var cfg = localStorage.getItem('cfg2');
   if (cfg) {
     try { enqueue({ kind: 'msg', dict: JSON.parse(cfg) }); } catch (e) {}
+  } else {
+    // Nothing saved, so the watch holds its own sizes. Asked first, ahead of
+    // any image, so the answer is back before a settings page needs it.
+    requestFonts();
   }
   // Replay the last weather payload (same pattern as cfg2): the watch does not
   // persist weather, and a fresh pass waits on a location fix and the network.
@@ -1995,5 +2069,9 @@ Pebble.addEventListener('appmessage', function (e) {
   // 2 = "I need a frame" -> bypass the committed transfer cache.
   if (e.payload['REQUEST_IMAGES']) {
     getLocation(e.payload['REQUEST_IMAGES'] === 2);
+  }
+  // The watch's answer to REQUEST_FONTS carries all four font keys.
+  if (e.payload['TopFont'] !== undefined) {
+    onWatchFonts(e.payload);
   }
 });

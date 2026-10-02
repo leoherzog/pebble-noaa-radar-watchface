@@ -75,12 +75,13 @@ enum { SLOT_TOP1, SLOT_TOP2, SLOT_BOT1, SLOT_BOT2 };
 // 31 Alerts else upcoming else Conditions.
 //
 // The persisted blob is versioned: load_settings() accepts it only when its
-// length and version byte both match this build, and otherwise keeps the
-// defaults. Bump SETTINGS_VERSION for any layout change (add, remove, reorder
-// or retype a field); every watch-bound setting then resets once. Length is
-// not a version: a reorder, a same-size retype or a field added in the three
-// padding bytes before lat100 all keep sizeof, and without a bump a blob
-// already on a user's watch passes both checks and is silently misparsed.
+// length and version byte both match this build, and otherwise treats the
+// launch as a first run. Bump SETTINGS_VERSION for any layout change (add,
+// remove, reorder or retype a field); every watch-bound setting then resets
+// once, and the first-run sizes are chosen again. Length is not a version: a
+// reorder, a same-size retype or a field added in the three padding bytes
+// before lat100 all keep sizeof, and without a bump a blob already on a
+// user's watch passes both checks and is silently misparsed.
 #define SETTINGS_VERSION 1
 
 typedef struct {
@@ -106,6 +107,28 @@ typedef struct {
 // Negative-array form because _Static_assert is C11 and the SDK builds with
 // -std=c99.
 typedef char settings_layout_check[(sizeof(Settings) == 24) ? 1 : -1];
+
+// ---- First-run sizes -------------------------------------------------------
+// The platform's default Text Size, which the public header leaves out
+// (firmware applib/preferred_content_size.h). preferred_content_size() reports
+// on this build's own scale, so anything above the default is Larger.
+#define CONTENT_SIZE_DEFAULT \
+  (PBL_DISPLAY_HEIGHT >= 200 ? PreferredContentSizeLarge \
+                             : PreferredContentSizeMedium)
+
+// Font bytes (slot_font_raw()) a first run takes when Text Size is above the
+// default, in display order: one rung up, shrink to fit, where that fits.
+// Each must be a size the settings page offers or custom-clay.js maps to one.
+static const uint8_t LARGER_FONTS[NUM_SLOTS] =
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_GABBRO)
+    { 8, 11, 9, 8 };
+#elif defined(PBL_PLATFORM_CHALK)
+    { 2, 11, 3, 2 };   // outer lines stay under their Small cap (slot_font())
+#else
+    // An Extra Large date runs to 194 px, which only emery and gabbro fit, so
+    // a platform with no measured row keeps it Large.
+    { 8, 11, 3, 8 };
+#endif
 
 // ============================================================================
 // GLOBAL STATE
@@ -1098,6 +1121,20 @@ static void inbox_received_callback(DictionaryIterator *iter, void *ctx) {
     update_slots();
   }
 
+  // ---- Size query --------------------------------------------------------
+  // pkjs asks while it holds no saved config, so its settings page can show
+  // this watch's sizes. The reply reuses the config's font keys. A busy outbox
+  // drops it and nothing here retries: pkjs asks again.
+  if (dict_find(iter, MESSAGE_KEY_REQUEST_FONTS)) {
+    DictionaryIterator *out;
+    if (app_message_outbox_begin(&out) == APP_MSG_OK) {
+      for (int i = 0; i < NUM_SLOTS; i++) {
+        dict_write_uint8(out, FONT_KEYS[i], s_settings.fonts[i]);
+      }
+      app_message_outbox_send();
+    }
+  }
+
   // ---- Weather block -----------------------------------------------------
   // One message carries every populated weather key, assembled on the phone.
   // WX_TIME is the phone's fetch time (pkjs replays its last payload on
@@ -1573,12 +1610,22 @@ static void load_settings(void) {
 
   // Take the stored blob only if it is exactly this struct's size and carries
   // this build's version; an older layout, a truncated write or corruption all
-  // keep the defaults above. Read into a scratch copy so a rejected blob cannot
+  // count as a first run. Read into a scratch copy so a rejected blob cannot
   // leave the live settings half-overwritten.
   Settings stored;
   int read = persist_read_data(SETTINGS_KEY, &stored, sizeof(stored));
   if (read == (int)sizeof(Settings) && stored.version == SETTINGS_VERSION) {
     s_settings = stored;
+  } else {
+    // First run: the system Text Size picks the sizes, once. The write makes
+    // the choice final, because every later launch loads this blob, so a
+    // Text Size change afterwards never resizes the face.
+    PreferredContentSize size = preferred_content_size();
+    if (size > CONTENT_SIZE_DEFAULT) {
+      memcpy(s_settings.fonts, LARGER_FONTS, sizeof(LARGER_FONTS));
+    }
+    persist_write_data(SETTINGS_KEY, &s_settings, sizeof(s_settings));
+    APP_LOG(APP_LOG_LEVEL_INFO, "First run, text size %d", (int)size);
   }
 
   // Corruption guard only (see sanitize_refresh): a 0 here would divide by
@@ -1610,7 +1657,8 @@ static void init(void) {
   app_message_register_inbox_dropped(inbox_dropped_callback);
   app_message_register_outbox_failed(outbox_failed_callback);
 
-  app_message_open(app_message_inbox_size_maximum(), 64);  // outbox: one small int
+  // Outbox: REQUEST_IMAGES (9 B) or the four-size reply (33 B).
+  app_message_open(app_message_inbox_size_maximum(), 64);
 
   // After app_message_open, deliberately: the 8,200 B inbox is a permanent
   // allocation, and a decode that fitted only because the inbox had not been

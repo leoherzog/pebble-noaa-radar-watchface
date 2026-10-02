@@ -14,6 +14,7 @@ Your phone does the heavy lifting: it figures out where you are, fetches the map
 - 📍 **Follows you around** — the map re-centers when you move, or set a fixed location manually
 - 🔍 **Three zoom levels** — City (100 km), State (250 km), or Region (500 km) across the screen
 - 📝 **Four configurable text lines** — Time, Date, Weekday, Steps, Distance, Calories, Sleep, Heart Rate, Battery, Bluetooth, Radar Age, Lat/Long, and more, each with its own font size from Extra Small up to Super Large, fixed or "shrink to fit"
+- 🔠 **Follows your watch's Text Size** — if Text Size is set to Larger when the face first runs, the time starts at Super Large and, on Pebble Time 2 and Pebble Round 2, the date at Extra Large, both shrink-to-fit
 - 🖍️ **Custom text and outline colors** — every line is drawn with a halo outline so it stays readable over busy map areas, and both colors are yours to pick
 - 🌦️ **Weather from the National Weather Service** — current conditions, temperature, feels like, dew point, humidity, wind, pressure, today's forecast, tonight/tomorrow, high/low, and active alerts, in imperial or metric units
 - 🌅 **Sunrise/sunset and golden hour** — computed on your phone from your exact position rather than fetched, so they don't depend on a nearby weather station, and shown in your watch's own 12- or 24-hour format
@@ -66,14 +67,14 @@ Open the watchface's settings in the Pebble phone app.
 | Refresh Interval | How often the radar, weather, and alerts refresh: 5, 10, 15, 20, 30, or 60 minutes (default 10) |
 | Use GPS | Follow the phone's location, or turn off to enter a fixed latitude/longitude |
 | Top/Bottom Lines 1 & 2 | What each of the four text lines shows |
-| Line Sizes | Extra Small through Super Large, fixed or shrink-to-fit (the two outer lines stop at Small on Pebble Time Round) |
+| Line Sizes | Extra Small through Super Large, fixed or shrink-to-fit (the two outer lines stop at Small on Pebble Time Round). A fresh install starts one size up, where it fits, when the watch's Text Size is Larger |
 | Text Color | Color of the four text lines (default black) |
 | Text Outline Color | Color of the halo drawn under the glyphs (default white) |
 | Bluetooth Disconnection Indicator | Show or hide the badge shown while the phone is out of range (default on) |
 | Units | Imperial (°F, mph, inHg) or Metric (°C, km/h, mb) |
 | Send Severe Weather Alerts to Timeline | Push severe and extreme NWS alerts into your Pebble timeline as pins (default on) |
 
-The two outer lines default to None, so out of the box you get a clean two-line face: time up top, date down below, radar behind.
+The two outer lines default to None, so out of the box you get a clean two-line face: time up top, date down below, radar behind. If your watch's Text Size is set to Larger when the face first runs, the face starts with larger text, and the settings page shows the sizes it picked. That choice is made once: changing Text Size later doesn't resize the face, so use Line Sizes for that. Text Size is in the watch's Settings under Display, or under Notifications on firmware older than PebbleOS 4.37.
 
 ## License
 

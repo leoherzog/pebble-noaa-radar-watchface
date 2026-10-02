@@ -69,7 +69,8 @@
       "TextColor",
       "OutlineColor",
       "RefreshInterval",
-      "BtIndicator"
+      "BtIndicator",
+      "REQUEST_FONTS"
     ],
     "resources": {
       "media": []

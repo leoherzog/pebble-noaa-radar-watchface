@@ -35,9 +35,9 @@ module.exports = function (minified) {
     })(clayConfig.config);
   }
 
-  // chalk's outer size dropdowns stop at Small. A saved size missing from a
-  // select leaves it blank, and a blank saves as 0 (Extra Small), so show the
-  // size the watch clamps it to: fixed to Small, auto to Small, shrink to fit.
+  // chalk's outer size dropdowns stop at Small. A size saved or reported by the
+  // watch that a select lacks leaves it blank, and a blank saves as 0 (Extra
+  // Small), so show its clamp: fixed to Small, auto to Small, shrink to fit.
   var CHALK_OUTER_CLAMP = { '2': '1', '3': '1', '4': '1', '10': '1',
                             '7': '6', '8': '6', '9': '6', '11': '6' };
 

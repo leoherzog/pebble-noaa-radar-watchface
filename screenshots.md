@@ -311,7 +311,10 @@ uv run --with pillow python screenshots/tools/contact.py <platform>
   setting's *on* default. A tile without pinned weather makes one extra alerts
   fetch, plus a `TL insertTimelinePin unavailable` log line when the point has
   a severe alert; a pinned tile makes no NWS request at all. Neither is visible
-  in the capture. Seed the key to `'0'` if a scenario needs the off arm.
+  in the capture. Seed the key to `'0'` if a scenario needs the off arm. The
+  flash wipe makes every capture a first run on the watch, logged as
+  `First run, text size <n>`, and the seeded `cfg2` then sets all four sizes,
+  so the emulator's Text Size never reaches a tile.
 - `screenshots/tools/capture.sh` — one tile end to end, printing its elapsed
   seconds. `GALLERY_DIR` redirects the output; `PEBBLE_EMULATOR_VERSION` pins
   the emulator's SDK and is forwarded to every emulator-touching command as
@@ -353,7 +356,10 @@ says must never be judged by eye. 14 (`textwidth-stress`) puts **both outer
 bands** on Weekday at a fixed Extra Small font, where a round display's chord is
 narrowest — so any change in text metrics or in outer-band placement moves those
 glyphs and shows up as a diff. Neither gate uses Super Large, fixed or
-shrink-to-fit.
+shrink-to-fit. Neither covers the first-run sizes either: every scenario seeds
+`cfg2`, which sets all four sizes, so a first-run change needs a capture from
+a store with no `cfg2` (CLAUDE.md, "Running the emulator from a non-graphical
+shell").
 
 Despite its slug, 14 does not cover width fitting. Weekday is `strftime("%A")`
 in `format_slot()`, formatted watch-side, so it never reaches

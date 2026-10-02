@@ -45,6 +45,7 @@ over Bluetooth. The watch just draws it.
 - Follows you as you move, or pin it to a fixed latitude and longitude
 - Three zoom levels — City (100 km), State (250 km), or Region (500 km) across the screen
 - Four configurable text lines: time, date, weekday, steps, distance, calories, sleep, heart rate, battery, Bluetooth, radar age, lat/long and more, each with its own size from Extra Small up to Super Large, including shrink-to-fit
+- Follows your watch's Text Size: if it is set to Larger when the face first runs, the time starts at Super Large and, on Pebble Time 2 and Pebble Round 2, the date at Extra Large
 - Custom text and outline colors — every line gets a halo so it stays readable over busy map areas
 - National Weather Service weather: current conditions, temperature, feels like, dew point, humidity, wind, pressure, today's forecast, tonight/tomorrow, high/low, and active alerts, in imperial or metric units
 - Sunrise/sunset and the golden hour window, computed for your exact location and shown in your watch's own 12- or 24-hour format
@@ -150,6 +151,7 @@ And for every watch:
 - **Super Large** — a sixth text size, fixed or shrink-to-fit. A Super Large 12-hour clock uses a one-letter am/pm ("10:00p") so it fits
 - **Alerts, else Upcoming, else Conditions** — a new line option that shows an alert in effect; if none is, it counts down to the most serious one that hasn't started yet ("Flood Watch in 3h"), and failing that shows current conditions
 - **High / Low on narrow lines** — shortens cleanly ("H82° L64°", then just the next high or low) instead of cutting a number off partway
+- **Follows Text Size on a fresh install** — if the watch's Text Size is set to Larger, the time starts at Super Large and, on Pebble Time 2 and Pebble Round 2, the date at Extra Large. Installs that already have settings are not changed
 - **Watch and warning colors** — a severe alert's timeline card is yellow for a watch and red for a warning. Needs Pebble app 1.14.0.1 or newer
 - **Timeline pins for long alerts** — a pin for an alert longer than a day now stays until the alert ends, instead of dropping off after 24 hours
 

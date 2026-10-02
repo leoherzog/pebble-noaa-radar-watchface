@@ -59,7 +59,7 @@ var SIZE_OPTIONS = [
 
 // chalk's outer lines sit where the visible chord is narrowest, so the watch
 // caps them at Small (slot_font() in main.c) and chalk's dropdown offers only
-// what renders. custom-clay.js maps a saved size this list lacks to its clamp.
+// what renders. custom-clay.js maps a size this list lacks to its clamp.
 var SIZE_OPTIONS_CHALK_OUTER = [
   { "label": "Extra Small", "value": "0" },
   { "label": "Small",       "value": "1" },
@@ -206,6 +206,8 @@ module.exports = [
     "type": "section",
     "items": [].concat(
       [{ "type": "heading", "defaultValue": "Overlay" }],
+      // These defaults mirror load_settings() in main.c at the default Text
+      // Size; sizes the watch reported (onWatchFonts in index.js) outrank them.
       // chalk's outer default is Small, the watch's clamp of Medium.
       line("Top Line 1",    "TopSlot1",     "4", "TopFont1",     "2", "1"),
       line("Top Line 2",    "TopSlot",      "0", "TopFont",      "4"),
