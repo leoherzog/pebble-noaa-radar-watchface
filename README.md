@@ -18,7 +18,7 @@ Your phone does the heavy lifting: it figures out where you are, fetches the map
 - 🌦️ **Weather from the National Weather Service** — current conditions, temperature, feels like, dew point, humidity, wind, pressure, today's forecast, tonight/tomorrow, high/low, and active alerts, in imperial or metric units
 - 🌅 **Sunrise/sunset and golden hour** — computed on your phone from your exact position rather than fetched, so they don't depend on a nearby weather station, and shown in your watch's own 12- or 24-hour format
 - ⚠️ **Alert-aware lines** — show your normal weather until an NWS alert takes over the line, or pick "Alerts, else Upcoming, else Conditions" to also count down to an alert that hasn't started yet. Alerts clear themselves when they expire, even if your phone is out of reach
-- 🗓️ **Severe alerts in your timeline** — tornado, severe thunderstorm, flash flood and other severe or extreme NWS alerts show up as timeline pins that run for as long as the alert does while this is your watchface, then quietly age out on their own. An alert longer than a day reads "All day" and is renewed each midnight. Pins can take several minutes to arrive, so treat them as a record of what's in force, not as a siren
+- 🗓️ **Severe alerts in your timeline** — tornado, severe thunderstorm, flash flood and other severe or extreme NWS alerts show up as timeline pins that run for as long as the alert does while this is your watchface, then quietly age out on their own. An alert longer than a day reads "All day" and is renewed each midnight. Open one and the card is yellow for a watch, red for a warning. Pins can take several minutes to arrive, so treat them as a record of what's in force, not as a siren
 - 🎨 **Translucent, opaque, or disabled radar** — or use it as a plain topo map face
 - 📶 **Bluetooth badge** — a Bluetooth rune appears in the top-left, or at the left edge of a round watch, the moment your phone goes out of range, so you know the radar has stopped updating
 - 🔋 **Frugal by design** — imagery is blended and re-encoded to 16 colors before it ever leaves the phone, a refresh that comes back looking identical isn't sent to the watch at all, and weather is only fetched if a weather line is actually configured (or timeline pins are on, which needs alerts either way)
@@ -51,7 +51,7 @@ pebble install --emulator emery
 
 - A color Pebble: Pebble Time or Time Steel (`basalt`), Pebble Time Round (`chalk`), Pebble Time 2 (`emery`), or Pebble Round 2 (`gabbro`)
 - A location in the United States (that's where NOAA's radar coverage ends!)
-- The Pebble phone app, for location, networking, and settings
+- The Pebble phone app, for location, networking, and settings (version 1.14.0.1 or newer for the yellow and red timeline cards)
 
 On the round watches, every text line fits itself to the width of the circle at its height, shortening its text (or shrinking it, on a shrink-to-fit line) rather than running under the bezel. Pebble Time Round has the least room at the very top and bottom of its screen, so there Top Line 1 and Bottom Line 2 go up to Small, and its settings page only offers the sizes that fit.
 

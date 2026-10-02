@@ -298,6 +298,14 @@ function iconFor(title) {
   return 'system://images/GENERIC_WARNING';
 }
 
+// Card colors by VTEC significance: W is a Warning, A is a Watch, and any other
+// takes none. Each must be a string, or the phone app drops the pin, and
+// palette-exact (00, 55, AA or FF per channel), where it and pebble-tool agree.
+var PIN_COLORS = {
+  W: { backgroundColor: '#FF0000', primaryColor: '#FFFFFF' },
+  A: { backgroundColor: '#FFFF00', primaryColor: '#000000' }
+};
+
 // Returns {id, pin, time, anchor, endSec}, or null (not severe, no VTEC key,
 // or an unusable nowSec). `time` is the walked start; `anchor` is the
 // first-seen onset, which the caller persists and passes back, 0 if none.
@@ -352,15 +360,20 @@ function buildPin(props, anchorSec, nowSec, dayStartSec) {
 
   // genericPin, never weatherPin: that requires `locationName` and its subtitle
   // takes only numbers and the degree symbol (pin-structure.md:624-626).
-  //
-  // No color fields: local pins ignore them. `pebble insert-pin` does render
-  // backgroundColor, because it bypasses the phone's local-pin path, so an
-  // emulator screenshot says nothing about real hardware.
   var layout = { type: 'genericPin', title: title };
   // Omitted, not emptied: an absent field must never enter the signature as ''.
   if (area) layout.subtitle = area;
   if (body) layout.body = body;
   layout.tinyIcon = iconFor(title);
+  // The significance is part of the pin id, so a pin never changes color. The
+  // colors paint only the opened card, its status bar and its action menu; the
+  // Timeline list row and Quick View ignore them.
+  var v = vtecOf(props);
+  var colors = (v && PIN_COLORS.hasOwnProperty(v.sig)) ? PIN_COLORS[v.sig] : null;
+  if (colors) {
+    layout.backgroundColor = colors.backgroundColor;
+    layout.primaryColor = colors.primaryColor;
+  }
 
   return {
     id: id,
@@ -510,8 +523,8 @@ function planPins(features, state, nowSec, dayStartSec) {
     if (!e) continue;                    // evicted by the cap just above
     var ch = chosen[cid];
     // Re-insert on any signature change: a reissue that moves `ends`, updated
-    // text, or the start stepping at a local midnight. Inserting an existing id
-    // updates that pin and never adds a second.
+    // text, or the start stepping at a local midnight. The colors are fixed per
+    // id. Inserting an existing id updates that pin and never adds a second.
     if (e.s !== ch.sig) {
       cands.push({ sev: ch.sev,
                    put: { id: cid, pin: ch.pin, sig: ch.sig, endSec: ch.x } });
