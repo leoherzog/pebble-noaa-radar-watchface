@@ -176,7 +176,11 @@ function pushTimelinePins(features) {
     var pr = features[i] && features[i].properties;
     if (timeline.isSevere(pr) && !timeline.pinIdFor(pr, nowSec)) noVtec++;
   }
-  for (k in tlState) { if (tlState.hasOwnProperty(k)) tracked++; }
+  // Not tlState.hasOwnProperty(k): a stored key of that name would shadow the
+  // method, and the call would throw.
+  for (k in tlState) {
+    if (Object.prototype.hasOwnProperty.call(tlState, k)) tracked++;
+  }
   // Logged on every fetch, zero included: in clear weather this line is the
   // only evidence the feature runs, and a broken read of the setting would
   // otherwise look exactly like a quiet sky.

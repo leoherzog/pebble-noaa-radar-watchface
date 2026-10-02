@@ -92,6 +92,12 @@ function sane(sec) {
   return typeof sec === 'number' && sec > -MAX_EPOCH_SEC && sec < MAX_EPOCH_SEC;
 }
 
+// An own-key test for a map read back from storage. tl_pins can hold a key
+// named hasOwnProperty, and the method called through the map would then throw.
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
 // Milliseconds stripped so the emitted string matches the documented form and
 // the signature cannot be perturbed by a formatting detail.
 function isoOf(sec) {
@@ -344,16 +350,15 @@ function planPins(features, state, nowSec) {
 
   var k, e, keys = [], i;
 
-  // GC first, so a corrupt or expired entry can never be read as an anchor. A
-  // blob written by an older or a future build is discarded per-entry rather
-  // than wholesale — one bad key must not cost every live pin its anchor.
+  // Shape GC first, so a corrupt entry can never be read as an anchor. A blob
+  // written by an older or a future build is discarded per-entry rather than
+  // wholesale — one bad key must not cost every live pin its anchor.
   for (k in state) {
-    if (!state.hasOwnProperty(k)) continue;
+    if (!hasOwn(state, k)) continue;
     e = state[k];
     if (!e || typeof e !== 'object' ||
         typeof e.t !== 'number' || !isFinite(e.t) ||
-        typeof e.x !== 'number' || !isFinite(e.x) ||
-        e.x < nowSec - GC_AGE_SEC) {
+        typeof e.x !== 'number' || !isFinite(e.x)) {
       delete state[k];
     }
   }
@@ -409,6 +414,16 @@ function planPins(features, state, nowSec) {
     e.x = chosen[r.id].x;
   }
 
+  // An entry this fetch did not list is dropped once its end is GC_AGE_SEC
+  // past.
+  //
+  // The age test stays off a listed entry: an alert can stay listed days past
+  // its stated end, and dropping its entry would re-insert the pin every fetch.
+  for (k in state) {
+    if (!hasOwn(state, k) || chosen.hasOwnProperty(k)) continue;
+    if (state[k].x < nowSec - GC_AGE_SEC) delete state[k];
+  }
+
   // Hard cap, run after the loop. Run before it, the cap could still leave
   // more than MAX_STATE_ENTRIES behind, and evicting lowest-`x` first would
   // match the order the candidate sort pushes in: above the cap every
@@ -418,7 +433,7 @@ function planPins(features, state, nowSec) {
   // Entries this plan did not see go first (deadest end first), then live ones,
   // latest end first. Dropping the latest-ending live entry is the one choice
   // that cannot fight the sort, which ranks soonest-ending first.
-  for (k in state) { if (state.hasOwnProperty(k)) keys.push(k); }
+  for (k in state) { if (hasOwn(state, k)) keys.push(k); }
   if (keys.length > MAX_STATE_ENTRIES) {
     keys.sort(function (a, b) {
       var la = chosen.hasOwnProperty(a) ? 1 : 0;
