@@ -117,7 +117,7 @@ frozen firmware and QEMU images, and most of what differs follows that line.
 | `emu-steps` moves Steps | yes | no | yes | no |
 | `emu-heart-rate` moves Heart Rate | yes | no | no | no |
 | `pebble screenshot` works after `emu-bt-connection --connected no` | yes | no | yes | no |
-| `emu-set-timeline-quick-view` obstructs the face | yes | untested | yes | no |
+| `emu-set-timeline-quick-view` obstructs the face | yes | yes | yes | no |
 | Battery reads in steps of | 1% | 10% | 1% | 10% |
 | Persisted composite (`Restored composite` in the log) | yes | no | yes | no |
 
@@ -172,11 +172,12 @@ shell". What is specific to this gallery:
   the 3 h weather window. It is the one tile whose clock differs across
   platforms, by the time between their captures, which `sweep.sh`'s
   tile-major order keeps to about a minute per platform.
-- `emu-set-time` occasionally no-ops, leaving a tile at wall-clock time. Read
-  the tiles back and re-run any that did.
-- `pebble screenshot` resyncs the watch clock to host time after it captures.
-  The tile is unaffected, but anything the app logs after the screenshot
-  describes host time, not the frame photographed.
+- `pebble screenshot` sets the watch back to host time as it connects, before
+  it grabs the frame, so the capture races the face's repaint and a tile
+  occasionally comes out at wall-clock time. Read the tiles back and re-run any
+  that did.
+- Anything the app logs after the screenshot describes host time, not the
+  frame photographed.
 
 ## Pinned weather
 
@@ -385,10 +386,10 @@ Expect 0 on every tile, provided both passes run on the same day and on the
 same side of New York's sunset: the basemap drifts over weeks, tile 10's clock
 resolves on the capture date, and its sun span rolls to the next day's pair at
 sunset. Tile 04 is left out because its `now+7m` clock moves with capture time.
-Tiles whose only diff is the clock digits are the intermittent `emu-set-time`
-no-op, not a regression — confirm by checking that the phone-side
-`Composite … hash <h>` line matches across the two runs, which settles
-whether the *image* changed independently of the text.
+Tiles whose only diff is the clock digits are the screenshot's clock race (see
+[Watch clock](#watch-clock)), not a regression — confirm by checking that the
+phone-side `Composite … hash <h>` line matches across the two runs, which
+settles whether the *image* changed independently of the text.
 
 To compare two builds, run each from its own scratch copy (see
 [Reproducing](#reproducing)) with its own `GALLERY_DIR`. A baseline copy made
