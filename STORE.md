@@ -49,7 +49,7 @@ over Bluetooth. The watch just draws it.
 - National Weather Service weather: current conditions, temperature, feels like, dew point, humidity, wind, pressure, today's forecast, tonight/tomorrow, high/low, and active alerts, in imperial or metric units
 - Sunrise/sunset and the golden hour window, computed for your exact location and shown in your watch's own 12- or 24-hour format
 - Alert-aware lines that show your normal weather until an alert takes over, or count down to one that hasn't started yet, and clear themselves when the alert expires even if your phone is out of reach
-- Severe alerts pushed to your Pebble timeline as pins that last as long as the alert does
+- Severe alerts pushed to your Pebble timeline as pins that last as long as the alert does, multi-day alerts included
 - Translucent, opaque, or radar off entirely — it makes a fine plain topo map face
 - A Bluetooth badge appears the moment your phone goes out of range, so you know the radar has stopped updating
 - Frugal by design: imagery is cut to 16 colors before it leaves the phone, an unchanged refresh isn't sent to the watch at all, and weather is only fetched when a weather line is actually configured or timeline pins are on
@@ -149,6 +149,7 @@ And for every watch:
 - **Super Large** — a sixth text size, fixed or shrink-to-fit. A Super Large 12-hour clock uses a one-letter am/pm ("10:00p") so it fits
 - **Alerts, else Upcoming, else Conditions** — a new line option that shows an alert in effect; if none is, it counts down to the most serious one that hasn't started yet ("Flood Watch in 3h"), and failing that shows current conditions
 - **High / Low on narrow lines** — shortens cleanly ("H82° L64°", then just the next high or low) instead of cutting a number off partway
+- **Timeline pins for long alerts** — a pin for an alert longer than a day now stays until the alert ends, instead of dropping off after 24 hours
 
 ## Release notes — v1.1.0
 

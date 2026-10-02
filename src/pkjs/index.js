@@ -157,22 +157,30 @@ function tlSaveState() {
 // anyway is deliberate: never committing would re-insert every tracked pin on
 // every heartbeat forever.
 
-// Push whatever this fetch's alert list implies. Called from fetchAlerts only
-// with the setting on, and only after it has called done(), so nothing here
-// can stall, delay or alter the weather AppMessage.
+// Pushes what the alert list implies, or with `features` null (a failed fetch)
+// renews multi-day pins from tl_pins. fetchAlerts calls it only with the
+// setting on and after done(), so it cannot stall or alter the weather message.
 function pushTimelinePins(features) {
   var nowSec = Math.floor(Date.now() / 1000);
+  // The local midnight a multi-day pin's start steps to. It is read
+  // DAY_ROLL_SLACK_SEC ahead, so a beat just short of midnight takes that day.
+  var day = new Date((nowSec + timeline.DAY_ROLL_SLACK_SEC) * 1000);
+  day.setHours(0, 0, 0, 0);
+  var dayStartSec = Math.floor(day.getTime() / 1000);
   var st = tlLoadState();
-  var plan = timeline.planPins(features, st, nowSec);
+  var plan = features ? timeline.planPins(features, st, nowSec, dayStartSec)
+                      : timeline.renewPins(st, nowSec, dayStartSec);
   tlState = plan.state;
-  tlSaveState();          // persists the GC and the first-seen anchors
+  // Persists the GC, the first-seen anchors and the stored layouts. renewPins
+  // changes nothing, so a renewal writes only below, if it had pins to insert.
+  if (features) tlSaveState();
 
   // planPins drops a Severe feature with no VTEC key silently, so this count
   // is the only sign one exists. If it is ever non-zero in the field, revisit
   // the decision rather than bolting on an unstable fallback id. Counted from
   // the module's pure exports so planPins keeps its two-field contract.
   var noVtec = 0, tracked = 0, i, k;
-  for (i = 0; i < features.length; i++) {
+  for (i = 0; features && i < features.length; i++) {
     var pr = features[i] && features[i].properties;
     if (timeline.isSevere(pr) && !timeline.pinIdFor(pr, nowSec)) noVtec++;
   }
@@ -184,8 +192,9 @@ function pushTimelinePins(features) {
   // Logged on every fetch, zero included: in clear weather this line is the
   // only evidence the feature runs, and a broken read of the setting would
   // otherwise look exactly like a quiet sky.
-  console.log('TL ' + plan.puts.length + ' pin(s) to push, ' + tracked +
-              ' tracked' + (noVtec ? ', ' + noVtec + ' skipped with no VTEC key' : ''));
+  console.log('TL ' + plan.puts.length + ' pin(s) to ' +
+              (features ? 'push' : 'renew') + ', ' + tracked + ' tracked' +
+              (noVtec ? ', ' + noVtec + ' skipped with no VTEC key' : ''));
 
   if (!plan.puts.length) return;
   if (typeof Pebble.insertTimelinePin !== 'function') {
@@ -201,7 +210,8 @@ function pushTimelinePins(features) {
     try {
       Pebble.insertTimelinePin(p.pin);
       timeline.commitPin(tlState, p.id, p.sig);
-      console.log('TL pin ' + p.id + ' pushed');
+      console.log('TL pin ' + p.id + ' pushed, ' + p.pin.time + ' +' +
+                  p.pin.duration + 'm');
     } catch (e) { console.log('TL push failed: ' + e); }
   });
   // Once, after the loop. Every commit above is already in tlState, so a pin
@@ -1072,12 +1082,14 @@ var WX_URG = { Immediate: 3, Expected: 2, Future: 1 };
 function fetchAlerts(lkey, cb) {
   fetchJson(WX_BASE + '/alerts/active?point=' + lkey + '&status=actual',
             function (status, obj) {
-    // Raw features, kept only for the timeline push. The PERSISTED wx_alerts
-    // blob keeps its five-field shape exactly: pins read the live response, so
+    // Raw features, kept only for the timeline push. The persisted wx_alerts
+    // blob keeps its five-field shape exactly: no pin is ever built from it, so
     // an entry written by an older build can never produce a malformed pin,
     // and multi-KB NWS descriptions never enter a localStorage that already
     // holds two base64 PNGs.
     var raw = null;
+    // Set only by a failed fetch, which still has to step multi-day pins.
+    var renew = false;
     if (status === 200 && obj && obj.features) {
       var feats = obj.features.map(function (ft) {
         var p = ft.properties || {};
@@ -1093,16 +1105,18 @@ function fetchAlerts(lkey, cb) {
       raw = obj.features;
     } else if (status === 400 && obj &&
                JSON.stringify(obj).indexOf('out of bounds') >= 0) {
+      // Not a renewal: out of bounds is an answer, not a failed fetch.
       markNoCoverage(lkey);
     } else {
       logWxFail('alerts', status, obj);
+      renew = true;
     }
     cb();
     // Must run after cb(), fetchWeather's `done()` sentinel, so nothing here
     // can stall `pending` and cost the watch its AppMessage; the try/catch is
     // a second layer. The setting is re-read rather than threaded in because
     // an alert slot also reaches this function with pins off.
-    if (raw && timelineAlerts()) {
+    if ((raw || renew) && timelineAlerts()) {
       try { pushTimelinePins(raw); }
       catch (e) { console.log('TL push failed: ' + e); }
     }
