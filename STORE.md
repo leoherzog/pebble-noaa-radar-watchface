@@ -4,7 +4,7 @@ Copy and assets for the
 [appstore listing](https://apps.repebble.com/2029ab9c84f946e1b125f8e0): what
 `pebble publish` prompts for, plus the fields the web dashboard
 (`appstore-api.repebble.com/dashboard`) lets you edit afterwards. The full
-description names v1.2.0 features, so it must not go live beside an older build.
+description must not go live before the build whose features it names.
 
 ## App name
 
@@ -88,6 +88,9 @@ only where the listing has no screenshot; the listing page and the Pebble phone
 app show icons for watchapps alone. Where the web store shows an icon it rounds
 the corners and draws the border itself, so both files are opaque full-bleed
 squares.
+
+The icon in the watch's own Watchfaces list is not a store asset. It is the
+build resource `resources/images/menu_icon.png`.
 
 Built by `screenshots/tools/icon.py`:
 
@@ -184,6 +187,10 @@ Alternate styles exist behind `--style` (`bleed` and `crisp` build the backdrop
 out of a screenshot, `panel` is flat dark) if the fetched backdrop ever needs to
 be dropped; `HERO`/`BACKDROP` at the top of the script pick the scenes.
 
+## Release notes — v1.2.1
+
+- **Watchfaces list icon** — the face shows a hurricane icon in the watch's Watchfaces list, in place of the generic one
+
 ## Release notes — v1.2.0
 
 Pebble Time Round (chalk) support, and a better fit on round screens:
@@ -226,7 +233,7 @@ And one settings change:
 ## App information
 
 - **Author / company**: Leo Herzog (`companyName` in the built PBW)
-- **Version**: 1.2.0 (`versionLabel`)
+- **Version**: 1.2.1 (`versionLabel`)
 - **UUID**: `6808fb9d-6728-4be3-8e2a-e65cba4e94c6`
 - **Type**: watchface
 - **Platforms**: emery, basalt, gabbro, chalk

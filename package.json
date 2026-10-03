@@ -1,7 +1,7 @@
 {
   "name": "noaa-us-weather-radar",
   "author": "Leo Herzog",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "keywords": [
     "pebble-app"
   ],
@@ -73,7 +73,16 @@
       "REQUEST_FONTS"
     ],
     "resources": {
-      "media": []
+      "media": [
+        {
+          "type": "bitmap",
+          "name": "MENU_ICON",
+          "file": "images/menu_icon.png",
+          "menuIcon": true,
+          "memoryFormat": "1Bit",
+          "storageFormat": "pbi"
+        }
+      ]
     }
   }
 }
