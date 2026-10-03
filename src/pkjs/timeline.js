@@ -28,13 +28,15 @@ var DAY_SEC = 86400;
 // It is under the 5-minute minimum refresh, so no scheduled beat steps early.
 var DAY_ROLL_SLACK_SEC = 120;
 
-// The longest local day, 25 h when clocks fall back. An older day start is a
-// caller bug, and the UTC day stands in for it.
-var DAY_MAX_SEC = 90000;
-
-// On that 25 h day local midnight turns a day old an hour before the next one,
-// so the start moves on by the hour to stay inside the sync window.
+// On the 25 h day when clocks fall back, local midnight turns a day old an hour
+// before the next one, so the start moves on by the hour to stay inside the
+// sync window.
 var DST_SHIFT_SEC = 3600;
+
+// The longest local day. An older day start is a caller bug, and the UTC day
+// stands in for it. Declared above DST_SHIFT_SEC, the sum would be NaN and
+// every day start would fall back to UTC.
+var DAY_MAX_SEC = DAY_SEC + DST_SHIFT_SEC;
 
 // A pin longer than this has to step again, so planPins keeps its layout for
 // renewPins.
@@ -92,17 +94,17 @@ function strHash(s) {
   return ('0000000' + h.toString(16)).slice(-8);
 }
 
-// Local copy of index.js's parseEpoch, because this module imports nothing.
+// Epoch seconds of a date string, or 0 when it is absent or does not parse.
 function parseEpochSec(s) {
   if (!s) return 0;
   var ms = Date.parse(s);
   return isNaN(ms) ? 0 : Math.floor(ms / 1000);
 }
 
-// A clock this module can actually work from. The typeof is not redundant with
-// the range test — null compares as 0 and would date every pin to 1970 — and
-// the relational form catches NaN, undefined and non-numeric strings, all of
-// which make every comparison false.
+// A clock this module can actually work from. The typeof is not redundant:
+// null passes the range test as 0 and would date every pin to 1970. The
+// relational form catches NaN, undefined and non-numeric strings, which fail
+// every comparison.
 function sane(sec) {
   return typeof sec === 'number' && sec > -MAX_EPOCH_SEC && sec < MAX_EPOCH_SEC;
 }
@@ -193,27 +195,17 @@ function clip(s, n) {
 // planPins filters only through buildPin, so it cannot drift from this rule.
 function isSevere(props) {
   if (!props) return false;
-  // Severity, not event name. Adding a Warning-or-Watch test changes nothing,
-  // and "ends with Warning" alone would admit Gale Warning (Moderate/Minor).
-  // Severity also covers seasons never sampled, where an event-name allowlist
-  // would need its winter rows guessed.
+  // Severity, not event name: "ends with Warning" would admit Gale Warning
+  // (Moderate/Minor), and an event allowlist would need rows guessed for
+  // seasons never sampled.
   if (props.severity !== 'Extreme' && props.severity !== 'Severe') return false;
-  // Cancellations and upgrades reach /alerts/active as messageType 'Alert'
-  // with severity Severe (a headline reading "has been replaced"), and a
-  // severity-only filter would pin them as live. urgency Past excludes exactly
-  // those: every CAN/UPG message in the corpus carried it and nothing else did.
+  // Cancellations and upgrades arrive as Severe 'Alert' messages, and urgency
+  // Past marks exactly those. A messageType 'Cancel' clause would never fire,
+  // and a VTEC action 'EXP' clause would drop in-force warnings in their final
+  // minutes. A certainty clause is unmeasured, and severity already encodes
+  // the tier.
   return props.urgency !== 'Past';
 }
-
-// Deliberately absent:
-//   messageType !== 'Cancel': Cancel never appears in /alerts/active, so the
-//     clause would never fire yet would look correct in review.
-//   VTEC action not in {CAN,UPG}: redundant, and it would couple the filter to
-//     the VTEC parse.
-//   VTEC action !== 'EXP': wrong. EXP means expiring naturally, and it would
-//     drop in-force Tornado Warnings in their final minutes. EXP urgency is
-//     never Past, so the rule above keeps them.
-//   any `certainty` clause: unmeasured, and severity already encodes the tier.
 
 // ---------------------------------------------------------------------------
 // Pin identity
@@ -222,7 +214,7 @@ function isSevere(props) {
 // P-VTEC: /k.aaa.cccc.pp.s.####.yymmddThhnnZ-yymmddThhnnZ/
 var VTEC_RE = /^\/[A-Z]\.[A-Z]{3}\.([A-Z0-9]{4})\.([A-Z]{2})\.([A-Z])\.(\d{4})\.(\d{6})T\d{4}Z-(\d{6})T\d{4}Z/;
 
-// NWS `parameters` values are always ARRAYS of strings, so the VTEC string is
+// NWS `parameters` values are always arrays of strings, so the VTEC string is
 // [0], not the value itself. A single alert can carry several VTEC segments
 // concatenated; anchoring at ^ takes the first, which is the one whose ETN
 // identifies this product.
@@ -237,15 +229,14 @@ function vtecOf(props) {
            beginYY: m[5], endYY: m[6] };
 }
 
-// The VTEC event key, which is stable across a reissue chain. The alert's own
-// `id` changes on every reissue, so hashing it would mint a duplicate pin each
-// time, and at 69 chars it is over the documented 64-char pin id cap.
-//
-// The year keeps a new year's event off the old one's tl_pins entry, because
-// ETNs recycle annually. It is the VTEC end's, as the begin is 000000T0000Z on
-// every CON/EXT reissue; an event EXTended across New Year mints a second pin.
+// The VTEC event key, which is stable across a reissue chain, or null. The year
+// keeps a new year's event off the old one's tl_pins entry, because ETNs
+// recycle annually. It is the VTEC end's, as the begin is 000000T0000Z on every
+// CON/EXT reissue; an EXT across New Year mints a second pin.
 function pinIdFor(props, nowSec) {
   var v = vtecOf(props);
+  // No fallback id: the alert's `id` and every other candidate change on
+  // reissue, so each would duplicate the pin, and `id` exceeds the 64-char cap.
   if (!v) return null;
   var yy;
   if (v.endYY !== '000000') yy = v.endYY.slice(0, 2);
@@ -259,19 +250,15 @@ function pinIdFor(props, nowSec) {
 // the test depend on call order.
 var PIN_ID_RE = /^wx\.\d{4}\.[A-Z0-9]{4}\.[A-Z]{2}\.[A-Z]\.\d{4}$/;
 
-// A feature whose VTEC key does not parse is skipped, with no fallback id.
-// Every fallback (a hash of `id`, of event+areaDesc+ends) changes across
-// reissues and would mint a duplicate pin each time, kept a day past its start.
-
 // ---------------------------------------------------------------------------
 // Pin content
 // ---------------------------------------------------------------------------
 
 // The HAZARD.../IMPACT... sections, when present, make a short body where the
 // raw description often overruns the body cap. The lookahead ends a section at
-// the next ALLCAPS... label or at end of string. No /g flag: a module-level /g
-// regex keeps lastIndex between calls, which would make bodyFor, and so
-// pinSig, depend on call order.
+// the next capitalised `WORD...` label or at end of string. No /g flag: a
+// module-level /g regex keeps lastIndex between calls, which would make
+// bodyFor, and so pinSig, depend on call order.
 var HAZARD_RE = /HAZARD\.\.\.(.*?)(?=[A-Z]{4,}\.\.\.|$)/;
 var IMPACT_RE = /IMPACT\.\.\.(.*?)(?=[A-Z]{4,}\.\.\.|$)/;
 
@@ -306,13 +293,18 @@ var PIN_COLORS = {
   A: { backgroundColor: '#FFFF00', primaryColor: '#000000' }
 };
 
+// The pin to insert. pinSig hashes JSON.stringify(pin), so reordering these
+// keys re-inserts every live pin.
+function pinAt(id, timeSec, mins, layout) {
+  return { id: id, time: isoOf(timeSec),
+           duration: Math.max(1, Math.min(MAX_DURATION_MIN, mins)),
+           layout: layout };
+}
+
 // Returns {id, pin, time, anchor, endSec}, or null (not severe, no VTEC key,
 // or an unusable nowSec). `time` is the walked start; `anchor` is the
-// first-seen onset, which the caller persists and passes back, 0 if none.
-//
-// Key insertion order is part of the contract: pinSig hashes
-// JSON.stringify(pin), so reordering these assignments re-inserts every live
-// pin.
+// first-seen onset, which the caller persists and passes back, 0 if none. The
+// layout's key order is part of pinSig's contract, as pinAt's is.
 function buildPin(props, anchorSec, nowSec, dayStartSec) {
   if (!isSevere(props)) return null;
   // An unrepresentable nowSec would make isoOf throw RangeError; no pin beats
@@ -335,8 +327,8 @@ function buildPin(props, anchorSec, nowSec, dayStartSec) {
 
   // The persisted anchor wins over a fresh `onset`, which moves forward on
   // reissues: the API stamps a CON/EXT with its send time.
-  var anchor = (anchorSec > 0) ? anchorSec : onsetSec;
-  if (anchor > anchorCeil(nowSec)) anchor = anchorCeil(nowSec);
+  var anchor = Math.min((anchorSec > 0) ? anchorSec : onsetSec,
+                        anchorCeil(nowSec));
   var timeSec = startFor(anchor, endSec, nowSec, dayStartSec);
 
   // Duration last, from the walked start, so the pin's end stays fixed: the
@@ -348,7 +340,6 @@ function buildPin(props, anchorSec, nowSec, dayStartSec) {
   // this). A 1-minute pin would stop reading as current at once, so use an
   // hour; an expiring alert that carries `ends` keeps its short pin.
   if (mins < 1 && !endsSec) mins = 60;
-  var duration = Math.max(1, Math.min(MAX_DURATION_MIN, mins));
 
   // Never run pin text through index.js's fitWx/budgetFor: they fit the watch's
   // text slots and would cut a pin title to 25 characters.
@@ -367,9 +358,9 @@ function buildPin(props, anchorSec, nowSec, dayStartSec) {
   layout.tinyIcon = iconFor(title);
   // The significance is part of the pin id, so a pin never changes color. The
   // colors paint only the opened card, its status bar and its action menu; the
-  // Timeline list row and Quick View ignore them.
-  var v = vtecOf(props);
-  var colors = (v && PIN_COLORS.hasOwnProperty(v.sig)) ? PIN_COLORS[v.sig] : null;
+  // Timeline list row and Quick View ignore them. vtecOf parses here, because
+  // pinIdFor returned an id.
+  var colors = PIN_COLORS[vtecOf(props).sig];
   if (colors) {
     layout.backgroundColor = colors.backgroundColor;
     layout.primaryColor = colors.primaryColor;
@@ -377,14 +368,14 @@ function buildPin(props, anchorSec, nowSec, dayStartSec) {
 
   return {
     id: id,
-    pin: { id: id, time: isoOf(timeSec), duration: duration, layout: layout },
+    pin: pinAt(id, timeSec, mins, layout),
     time: timeSec,
     anchor: anchor,
     endSec: endSec
   };
 }
 
-// Deterministic because buildPin and renewPins insert keys in one fixed order.
+// Deterministic because pinAt and buildPin insert keys in one fixed order.
 function pinSig(pin) {
   return strHash(JSON.stringify(pin));
 }
@@ -397,14 +388,11 @@ function pinSig(pin) {
 // the signature the timeline is believed to hold, and the pin's layout while
 // it is longer than a day and the last successful fetch listed its alert.
 
-// Returns {puts, state}: the pins to insert and the persisted dedupe map,
-// mutated in place and returned. Written not to throw on a response nobody
-// controls, but a field that is an object with a `toString` key still does.
-//
-// It never sets `s`, because a plan is not a delivery. Only commitPin does,
-// and index.js calls it only once Pebble.insertTimelinePin() has returned
-// without throwing, the only evidence that call gives. An insert that throws
-// therefore cannot poison the cache into skipping that pin forever.
+// Returns {puts, state}, the state mutated in place. It does not throw on a
+// malformed response, except on a field that is an object with a `toString`
+// key. It never sets `s`: only commitPin does, once an insert returns without
+// throwing, so a failed insert cannot poison the cache into skipping that pin
+// forever.
 function planPins(features, state, nowSec, dayStartSec) {
   if (!state || typeof state !== 'object') state = {};
   // Same guard as buildPin's, for the same reason: nowSec drives the GC cutoff
@@ -415,9 +403,9 @@ function planPins(features, state, nowSec, dayStartSec) {
 
   var k, e, keys = [], i;
 
-  // Shape GC first, so a corrupt entry can never be read as an anchor. A blob
-  // written by an older or a future build is discarded per-entry rather than
-  // wholesale — one bad key must not cost every live pin its anchor.
+  // Shape GC first, so a corrupt entry can never be read as an anchor. It runs
+  // per entry, not on the whole blob, so one bad key cannot cost every live
+  // pin its anchor.
   for (k in state) {
     if (!hasOwn(state, k)) continue;
     e = state[k];
@@ -428,14 +416,12 @@ function planPins(features, state, nowSec, dayStartSec) {
     }
   }
 
-  // Duck-typed rather than Array.isArray'd, and length-checked rather than
-  // trusted: `features` comes straight off a parsed JSON body.
+  // Duck-typed and length-checked: `features` comes straight off a parsed JSON
+  // body.
   var feats = (features && typeof features.length === 'number') ? features : [];
-  // One representative per pin id. NWS splits a VTEC product into per-zone
-  // segments that arrive as separate features sharing office/phenom/sig/ETN; a
-  // candidate per feature would make each insert overwrite the other, and the
-  // pin would rewrite itself every heartbeat without the dedupe converging. One
-  // id can only hold one segment's text anyway.
+  // One representative per pin id: NWS splits a product into per-zone features
+  // sharing one VTEC key, and a candidate per feature would rewrite the pin
+  // every heartbeat without the dedupe converging.
   var chosen = {}, ids = [];
 
   for (i = 0; i < feats.length; i++) {
@@ -461,45 +447,35 @@ function planPins(features, state, nowSec, dayStartSec) {
     // the start would let two segments swap text at every step.
     var tie = strHash(JSON.stringify(r.pin.layout));
     var c = chosen[r.id];
-    if (!c) {
-      chosen[r.id] = { sev: (props.severity === 'Extreme') ? 1 : 0,
-                       x: x, sig: sig, tie: tie, pin: r.pin };
-      ids.push(r.id);
+    if (!c) ids.push(r.id);
     // Latest end wins, so the pin outlives its sibling segments. Equal ends go
     // to the lower layout hash, never to feed order, which NWS does not promise
     // is stable.
-    } else if (x > c.x || (x === c.x && tie < c.tie)) {
-      c.sev = (props.severity === 'Extreme') ? 1 : 0;
-      c.x = x; c.sig = sig; c.tie = tie; c.pin = r.pin;
+    if (!c || x > c.x || (x === c.x && tie < c.tie)) {
+      chosen[r.id] = { sev: (props.severity === 'Extreme') ? 1 : 0,
+                       x: x, sig: sig, tie: tie, pin: r.pin };
     }
-    // Written here, not after the cap below, which sorts on it: a new entry
-    // would otherwise still read x 0 there, so the cap would spare every new
-    // entry and evict the survivors of the last plan, and above the cap the
-    // dedupe would never converge.
+    // Written here, not after the cap, which sorts on it: a new entry would
+    // still read x 0 there, the cap would evict the last plan's survivors
+    // instead, and above the cap the dedupe would never converge.
     e.x = chosen[r.id].x;
   }
 
-  // An entry this fetch did not list loses its layout, so renewPins cannot keep
-  // alive the pin of an alert that has left the feed, and is dropped once its
-  // end is GC_AGE_SEC past.
-  //
-  // The age test stays off a listed entry: an alert can stay listed days past
-  // its stated end, and dropping its entry would re-insert the pin every fetch.
+  // An unlisted entry loses its layout, so renewPins cannot keep alive the pin
+  // of an alert that left the feed, and is dropped once its end is GC_AGE_SEC
+  // past. Never age out a listed entry: an alert can stay listed days past its
+  // stated end, and dropping its entry would re-insert the pin every fetch.
   for (k in state) {
     if (!hasOwn(state, k) || chosen.hasOwnProperty(k)) continue;
     if (state[k].x < nowSec - GC_AGE_SEC) delete state[k];
     else delete state[k].l;
   }
 
-  // Hard cap, run after the loop. Run before it, the cap could still leave
-  // more than MAX_STATE_ENTRIES behind, and evicting lowest-`x` first would
-  // match the order the candidate sort pushes in: above the cap every
-  // committed entry would be deleted before the next plan read it, and
+  // Hard cap, run after the feature loop, which adds entries. Unlisted entries
+  // go first, deadest end first, then listed ones, latest end first: evicting
+  // the soonest-ending would match the candidate sort's order, so above the cap
+  // every committed entry would be deleted before the next plan read it and
   // re-inserted forever.
-  //
-  // Entries this plan did not see go first (deadest end first), then live ones,
-  // latest end first. Dropping the latest-ending live entry is the one choice
-  // that cannot fight the sort, which ranks soonest-ending first.
   for (k in state) { if (hasOwn(state, k)) keys.push(k); }
   if (keys.length > MAX_STATE_ENTRIES) {
     keys.sort(function (a, b) {
@@ -542,8 +518,8 @@ function planPins(features, state, nowSec, dayStartSec) {
     return a.put.id < b.put.id ? -1 : (a.put.id > b.put.id ? 1 : 0);
   });
 
-  var puts = [];
-  for (i = 0; i < cands.length && i < MAX_PUTS_PER_FETCH; i++) puts.push(cands[i].put);
+  var puts = cands.slice(0, MAX_PUTS_PER_FETCH)
+                  .map(function (cd) { return cd.put; });
   return { puts: puts, state: state };
 }
 
@@ -554,7 +530,7 @@ function renewPins(state, nowSec, dayStartSec) {
   if (!state || typeof state !== 'object') state = {};
   if (!sane(nowSec)) return { puts: [], state: state };
 
-  var cands = [], k, e, i;
+  var cands = [], k, e;
   for (k in state) {
     if (!hasOwn(state, k)) continue;
     e = state[k];
@@ -563,15 +539,11 @@ function renewPins(state, nowSec, dayStartSec) {
         !e.l || typeof e.l !== 'object' ||
         typeof e.l.type !== 'string' || typeof e.l.title !== 'string' ||
         !sane(e.t) || !(e.t > 0) || !sane(e.x) || !(e.x > nowSec)) continue;
-    var anchor = e.t;
-    if (anchor > anchorCeil(nowSec)) anchor = anchorCeil(nowSec);
-    // Built through startFor, as buildPin's is, so a renewed pin and a planned
-    // one cannot disagree.
-    var timeSec = startFor(anchor, e.x, nowSec, dayStartSec);
-    var mins = Math.round((e.x - timeSec) / 60);
-    var pin = { id: k, time: isoOf(timeSec),
-                duration: Math.max(1, Math.min(MAX_DURATION_MIN, mins)),
-                layout: e.l };
+    // Built through startFor and pinAt, as buildPin's is, so a renewed pin and
+    // a planned one cannot disagree.
+    var timeSec = startFor(Math.min(e.t, anchorCeil(nowSec)), e.x, nowSec,
+                           dayStartSec);
+    var pin = pinAt(k, timeSec, Math.round((e.x - timeSec) / 60), e.l);
     var sig = pinSig(pin);
     if (sig !== e.s) cands.push({ id: k, pin: pin, sig: sig, endSec: e.x });
   }
@@ -582,27 +554,23 @@ function renewPins(state, nowSec, dayStartSec) {
     return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0);
   });
 
-  var puts = [];
-  for (i = 0; i < cands.length && i < MAX_PUTS_PER_FETCH; i++) puts.push(cands[i]);
-  return { puts: puts, state: state };
+  return { puts: cands.slice(0, MAX_PUTS_PER_FETCH), state: state };
 }
 
 // Records that the timeline now holds this signature. A missing entry is
 // ignored; the next plan recreates it with s null and re-inserts, which is
 // wasteful but never wrong.
 function commitPin(state, id, sig) {
-  if (!state || typeof state !== 'object') state = {};
-  if (state[id]) state[id].s = sig;
-  return state;
+  if (state && state[id]) state[id].s = sig;
 }
 
 // ---------------------------------------------------------------------------
-// Exports — all pure; delivery lives in index.js
+// Exports: all pure; delivery lives in index.js
 // ---------------------------------------------------------------------------
 
 module.exports = {
-  MAX_PUTS_PER_FETCH: MAX_PUTS_PER_FETCH,
   DAY_ROLL_SLACK_SEC: DAY_ROLL_SLACK_SEC,
+  parseEpochSec:      parseEpochSec,
   isSevere:           isSevere,
   pinIdFor:           pinIdFor,
   buildPin:           buildPin,

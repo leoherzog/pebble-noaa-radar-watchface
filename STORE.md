@@ -190,6 +190,7 @@ be dropped; `HERO`/`BACKDROP` at the top of the script pick the scenes.
 ## Release notes — v1.2.1
 
 - **Watchfaces list icon** — the face shows a hurricane icon in the watch's Watchfaces list, in place of the generic one
+- **Bugfix for Radar Age** — no longer shows a newer time than the map on screen after a radar update fails to load
 
 ## Release notes — v1.2.0
 

@@ -11,6 +11,8 @@
 // hoisted transitive dep of upng-js: a future upng bump that nests its own
 // copy would otherwise break the build.
 var pako = require('pako');
+// A pako 1.x internal, already bundled because pako's deflate requires it.
+var pakoCrc32 = require('pako/lib/zlib/crc32');
 
 // ---------------------------------------------------------------------------
 // The pixel rule
@@ -32,8 +34,8 @@ var pako = require('pako');
 //
 // The a === 3 branch is unreachable in translucent mode and needed in opaque.
 //
-// The tier label used by the fold is the radar SOURCE color (floored to 6-bit)
-// wherever a > 0, and -1 elsewhere.
+// The tier label used by the fold, `src`, is the radar source color (floored
+// to 6-bit) wherever a > 0, and -1 elsewhere.
 
 // bmRgba: quantized basemap RGBA, w*h*4. rdRgba: quantized radar RGBA, or null
 // when the radar layer is Disabled (every pixel then reads as a === 0, i.e. a
@@ -55,17 +57,18 @@ function buildComposite(bmRgba, rdRgba, radarMode, w, h, round) {
     if (hidden && hidden[i]) continue;
     var p = i * 4;
     var br = bmRgba[p], bg = bmRgba[p + 1], bb = bmRgba[p + 2];
-    var a = 0, sr = 0, sg = 0, sb = 0;
+    var a = 0, sr = 0, sg = 0, sb = 0, src = -1;
     if (rdRgba) {
       a = rdRgba[p + 3] >> 6;                    // 0..3
       if (translucent && a === 3) a = 2;
       sr = rdRgba[p]; sg = rdRgba[p + 1]; sb = rdRgba[p + 2];
+      if (a > 0) src = ((sr >> 6) << 4) | ((sg >> 6) << 2) | (sb >> 6);
     }
     var out;
     if (a === 0) {
       out = ((br >> 6) << 4) | ((bg >> 6) << 2) | (bb >> 6);     // pass through
     } else if (a === 3) {
-      out = ((sr >> 6) << 4) | ((sg >> 6) << 2) | (sb >> 6);     // pass through
+      out = src;                                                 // pass through
     } else {
       var f = a / 3, g = 1 - f;                                  // computed
       out = (Math.round((sr * f + br * g) / 85) << 4) |
@@ -73,13 +76,12 @@ function buildComposite(bmRgba, rdRgba, radarMode, w, h, round) {
              Math.round((sb * f + bb * g) / 85);
     }
     fb[i] = out;
-    var tr = (a > 0) ? (((sr >> 6) << 4) | ((sg >> 6) << 2) | (sb >> 6)) : -1;
-    tally[out * 65 + tr + 1]++;
+    tally[out * 65 + src + 1]++;
   }
 
   // One tier label per output color: the tier that contributed the most pixels
-  // to it. Ties resolve to the LOWEST label index, where -1 (non-radar) sorts
-  // first — fixed here rather than left to a sort's stability, because the
+  // to it. Ties resolve to the lowest label index, where -1 (non-radar) sorts
+  // first, fixed here rather than left to a sort's stability, because the
   // transfer cache only ever hits if identical inputs give byte-identical
   // output.
   var tier = new Int16Array(64), hist = new Int32Array(64);
@@ -142,7 +144,7 @@ function foldTo16(hist, tier) {
     for (i = 0; i < cols.length; i++) {
       for (j = i + 1; j < cols.length; j++) {
         var A = cols[i], B = cols[j];
-        // Squared distance in the EXPANDED (v*85) space.
+        // Squared distance in the expanded (v*85) space.
         var dr = (((A >> 4) & 3) - ((B >> 4) & 3)) * 85;
         var dg = (((A >> 2) & 3) - ((B >> 2) & 3)) * 85;
         var db = ((A & 3) - (B & 3)) * 85;
@@ -163,7 +165,7 @@ function foldTo16(hist, tier) {
     cols.splice(cols.indexOf(drop), 1);
   }
   // cols was built ascending and splice preserves order, so the emitted
-  // palette is always ascending by 6-bit value — deterministic palette order
+  // palette is always ascending by 6-bit value: deterministic palette order
   // is what makes the hash cache able to hit at all.
   return { pal: cols, map: map };
 }
@@ -174,7 +176,7 @@ function foldTo16(hist, tier) {
 //
 // The firmware's topleft_mask for each round display, keyed by width: row y
 // shows columns [m, w - 1 - m] with m = mask[min(y, h - 1 - y)]
-// (reference/PebbleOS src/fw/board/displays/display_getafix.c; 180 is
+// (reference/PebbleOS/fw/board/displays/display_getafix.c; 180 is
 // g_gbitmap_legacy_3x_data_row_infos, the table SDK 4.33's chalk QEMU image
 // carries too).
 // Only these tables are safe: a computed circle one pixel too tight would
@@ -217,11 +219,11 @@ function hiddenPixels(w, h, round) {
 // ---------------------------------------------------------------------------
 //
 // Constraints below are verified against the firmware decoder
-// (reference/PebbleOS/src/fw/applib/vendor/uPNG/upng.c and
+// (reference/PebbleOS/fw/applib/vendor/uPNG/upng.c and
 // .../graphics/gbitmap_png.c). Violate any of them and the decode fails
-// SILENTLY — the firmware hands back a GBitmap with a NULL pixel buffer:
+// silently: the firmware hands back a GBitmap with a NULL pixel buffer.
 //
-//   - Exactly ONE IDAT chunk. upng.c carries "TODO: fix for multiple
+//   - Exactly one IDAT chunk. upng.c carries "TODO : fix for multiple
 //     consecutive IDAT chunks (PBL-14294)". Never split it.
 //   - zlib-wrapped deflate, not raw: uz_inflate checks the 2-byte header
 //     ((b0*256+b1) % 31 == 0, (b0 & 15) == 8, (b0 >> 4) <= 7) and rejects a
@@ -232,38 +234,24 @@ function hiddenPixels(w, h, round) {
 //     16 entries anyway, and palette_entries = data_length / 3, so a short
 //     PLTE would leave entries at (0,0,0).
 //   - No tRNS: absent alpha means GColorFromRGBA(..., UINT8_MAX) => a = 3,
-//     fully opaque. Correct — the composite is opaque and the watch draws it
-//     at the default GCompOpAssign.
+//     fully opaque, which is correct: the composite is opaque and the watch
+//     draws it at the default GCompOpAssign.
 //   - uPNG does not verify chunk CRCs; emit correct ones anyway so the file
 //     stays a valid PNG for any other decoder.
 
 var SIG = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 
-var CRC_T = (function () {
-  var t = new Uint32Array(256), c, n, k;
-  for (n = 0; n < 256; n++) {
-    c = n;
-    for (k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-    t[n] = c >>> 0;
-  }
-  return t;
-})();
-
-function crc32(b, from, to) {
-  var c = 0xFFFFFFFF;
-  for (var i = from; i < to; i++) c = CRC_T[(c ^ b[i]) & 255] ^ (c >>> 8);
-  return (c ^ 0xFFFFFFFF) >>> 0;
+function put32(arr, at, v) {            // big-endian
+  arr[at] = (v >>> 24) & 255;     arr[at + 1] = (v >>> 16) & 255;
+  arr[at + 2] = (v >>> 8) & 255;  arr[at + 3] = v & 255;
 }
 
 function pngChunk(type, data) {          // type: 4 ASCII chars
   var out = new Uint8Array(12 + data.length), L = data.length, i;
-  out[0] = (L >>> 24) & 255; out[1] = (L >>> 16) & 255;
-  out[2] = (L >>> 8) & 255;  out[3] = L & 255;
+  put32(out, 0, L);
   for (i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
   out.set(data, 8);
-  var c = crc32(out, 4, 8 + L);
-  out[8 + L] = (c >>> 24) & 255; out[9 + L] = (c >>> 16) & 255;
-  out[10 + L] = (c >>> 8) & 255; out[11 + L] = c & 255;
+  put32(out, 8 + L, pakoCrc32(0, out, 4 + L, 4));       // over type and data
   return out;
 }
 
@@ -287,24 +275,21 @@ function png4(idx, pal, w, h) {
     }
   }
   var ihdr = new Uint8Array(13);
-  ihdr[0] = (w >>> 24) & 255; ihdr[1] = (w >>> 16) & 255;
-  ihdr[2] = (w >>> 8) & 255;  ihdr[3] = w & 255;
-  ihdr[4] = (h >>> 24) & 255; ihdr[5] = (h >>> 16) & 255;
-  ihdr[6] = (h >>> 8) & 255;  ihdr[7] = h & 255;
+  put32(ihdr, 0, w);
+  put32(ihdr, 4, h);
   ihdr[8] = 4;      // bit depth 4
   ihdr[9] = 3;      // color type 3, palette
   ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;        // deflate / filter 0 / no interlace
-  // ALWAYS 16 entries, zero-padded. Emitted as (v * 85) per channel because
-  // the watch decodes palette entries with GColorFromRGBA, which truncates
-  // (>>6), and (v * 85) >> 6 == v exactly for v in {0,1,2,3}. That is
-  // arithmetic, not a firmware coupling.
+  // Always 16 entries, zero-padded, as (v * 85) per channel: the watch decodes
+  // them with GColorFromRGBA, which truncates (>> 6), and (v * 85) >> 6 == v
+  // for every v in 0..3.
   var plte = new Uint8Array(48);
   for (i = 0; i < pal.length; i++) {
     plte[i * 3]     = ((pal[i] >> 4) & 3) * 85;
     plte[i * 3 + 1] = ((pal[i] >> 2) & 3) * 85;
     plte[i * 3 + 2] = (pal[i] & 3) * 85;
   }
-  var idat = pako.deflate(raw, { level: 9 });      // zlib-wrapped, ONE chunk
+  var idat = pako.deflate(raw, { level: 9 });      // zlib-wrapped, one chunk
   return concat([SIG,
                  pngChunk('IHDR', ihdr),
                  pngChunk('PLTE', plte),

@@ -1,7 +1,9 @@
-// All four slot dropdowns offer identical choices, and so do the size
-// dropdowns bar chalk's outer pair, so they share one array each. That is
-// safe because the options array is only ever read: a select's state is its
-// own value, never anything stored in options.
+// The Clay settings page. RadarMode, Zoom, UseGps, ManualLoc, WxUnits and
+// TimelineAlerts are phone-side, not package.json messageKeys: webviewclosed
+// stores them in localStorage, with UseGps folded into ManualLoc ('' = GPS).
+// Clay prefills by messageKey, so renaming a key or renumbering a value resets
+// or changes every saved config.
+
 var SLOT_OPTIONS = [
   { "label": "Time",           "value": "0" },
   { "label": "Date",           "value": "1" },
@@ -66,9 +68,9 @@ var SIZE_OPTIONS_CHALK_OUTER = [
   { "label": "Small, shrink to fit", "value": "6" }
 ];
 
-// One line of the face: what it shows, and how big. The inner lines keep the
-// historical keys TopSlot/TopFont and BottomSlot/BottomFont, because renaming a
-// messageKey resets every saved config.
+// One line of the face: what it shows, and how big. TopSlot/TopFont is Top
+// Line 2 and BottomSlot/BottomFont is Bottom Line 1; like every key, they must
+// not be renamed to match.
 //
 // An outer line passes chalkFontDefault and gets two size items on one
 // messageKey. Clay builds only the item whose capabilities match the watch,
@@ -131,11 +133,6 @@ module.exports = [
         "type": "heading",
         "defaultValue": "Map"
       },
-      // Phone-side only, like Zoom and WxUnits: pkjs applies the mode while
-      // blending, so it is not a package.json messageKey and never reaches the
-      // watch; index.js reads localStorage.RadarMode on every refresh. Never
-      // rename the key: Clay prefills by messageKey, so a rename resets every
-      // saved config.
       {
         "type": "select",
         "messageKey": "RadarMode",
@@ -158,9 +155,7 @@ module.exports = [
           { "label": "Region (500 km)", "value": "2" }
         ]
       },
-      // Watch-bound, unlike Zoom and WxUnits: the watch owns the heartbeat
-      // that drives imagery and weather. Values must divide 60, because
-      // tick_handler fires on tm_min % value.
+      // Values must divide 60, because tick_handler fires on tm_min % value.
       {
         "type": "select",
         "messageKey": "RefreshInterval",
@@ -176,10 +171,8 @@ module.exports = [
         ],
         "description": "How often the radar, weather, and alerts refresh. Longer intervals use less battery."
       },
-      // UseGps and ManualLoc are phone-side only: pkjs owns all coordinate
-      // math, so neither is a package.json messageKey. custom-clay.js hides
-      // the input while the toggle is on and disables Save until the text
-      // parses as a coordinate pair.
+      // custom-clay.js hides ManualLoc while UseGps is on, shows ManualLocError
+      // and disables Save until the text parses as a coordinate pair.
       {
         "type": "toggle",
         "messageKey": "UseGps",
@@ -229,8 +222,6 @@ module.exports = [
           "label": "Text Outline Color",
           "defaultValue": "FFFFFF"
         },
-        // Watch-bound, like RefreshInterval: the badge is drawn from
-        // connection_service state the phone never sees.
         {
           "type": "toggle",
           "messageKey": "BtIndicator",
@@ -247,12 +238,8 @@ module.exports = [
         "type": "heading",
         "defaultValue": "Weather"
       },
-      // Phone-side only, like Zoom: webviewclosed stores it in localStorage
-      // and a change refetches weather. It drives every unit the face renders,
-      // because a user who asks for Celsius wants km/h and millibars too.
-      // Never rename the messageKey or renumber its values: Clay prefills from
-      // localStorage['clay-settings'] keyed by messageKey, so either silently
-      // resets or changes every saved config.
+      // One setting drives every unit, because a user who asks for Celsius
+      // wants km/h and millibars too.
       {
         "type": "select",
         "messageKey": "WxUnits",
@@ -263,11 +250,8 @@ module.exports = [
           { "label": "Metric (°C, km/h, mb)",      "value": "1" }
         ]
       },
-      // Phone-side only, like WxUnits: pkjs owns the alert fetch and the
-      // timeline insert, so it is deliberately not a package.json messageKey.
       // Defaults on, so index.js reads it through numSetting()'s explicit
       // default: the key is null on a fresh install and Number(null) is 0.
-      // Never rename the key; a rename resets every saved config.
       {
         "type": "toggle",
         "messageKey": "TimelineAlerts",

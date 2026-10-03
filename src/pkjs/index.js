@@ -11,8 +11,8 @@
 
 var Clay = require('@rebble/clay');
 // PNG codec for the fetched layers. Each 256-color layer is re-quantized to
-// 16 colors (shrinkPng) before the blend: blending the originals measured
-// 37-42 output colors instead of 19-29, with no byte saving and a muddy result.
+// 16 colors (shrinkPng) before the blend: blending the originals gives more
+// output colors, no byte saving and a muddy result.
 var UPNG = require('upng-js');
 // The blend, the palette fold and the 4bpp PNG encoder. Kept in its own
 // module so it stays pure arithmetic over typed arrays (no Pebble APIs, no
@@ -76,109 +76,82 @@ function parseManualLoc(s) {
   return { lat: lat, lon: lon };
 }
 
-// The manual-location override, stored under one key: '' or absent means GPS,
-// anything else is the "lat,lon" webviewclosed validated and wrote.
-function manualLocation() {
-  var s = localStorage.getItem('ManualLoc');
-  return s ? parseManualLoc(s) : null;
-}
+// The phone-side enum settings' defaults, read by numSetting() and compared
+// against by webviewclosed, so a Save that leaves one at its default is no
+// change. Each must equal its item's defaultValue in config.js. Each name is
+// both a Clay messageKey and a localStorage key: renaming one, or renumbering
+// its values, changes every saved choice.
+var SETTING_DEFAULTS = { Zoom: 1, RadarMode: 1, WxUnits: 0, TimelineAlerts: 1 };
 
 // A bounded-enum setting from localStorage, with the default branched
-// explicitly rather than clamped into: these keys are written only when the
-// user saves the config page, so they are null on a fresh install, and
-// Number(null) is 0, not NaN — a plain clamp would silently accept it as the
-// enum's zero value. '' (a cleared key) reads the same way. Out-of-range and
-// NaN fall back too, so a corrupt value can never leave the domain.
-function numSetting(key, def, lo, hi) {
+// explicitly rather than clamped into: the keys are null until the first Save,
+// and Number(null) is 0, so a plain clamp would read a fresh install as the
+// enum's zero value. '' (a cleared key), NaN and out-of-range values fall back
+// too, so a corrupt value can never leave the domain.
+function numSetting(key, lo, hi) {
+  var def = SETTING_DEFAULTS[key];
   var raw = localStorage.getItem(key);
   var v = (raw === null || raw === '') ? def : Number(raw);
   if (isNaN(v) || v < lo || v > hi) v = def;
   return v;
 }
 
-// 0 Disabled, 1 Translucent, 2 Opaque. Phone-side only, like Zoom and
-// WxUnits, because the blend happens here. Without the explicit default a
-// fresh install would read as Disabled and ship a basemap with no radar.
+// Stores a phone-side setting's string and returns true when it differs from
+// the stored one, an absent or '' value reading as def.
+function storeSetting(key, val, def) {
+  var changed = val !== (localStorage.getItem(key) || String(def));
+  localStorage.setItem(key, val);
+  return changed;
+}
+
+// 0 Disabled, 1 Translucent, 2 Opaque.
 function radarMode() {
-  return numSetting('RadarMode', 1, 0, 2);
+  return numSetting('RadarMode', 0, 2);
 }
 
-// Push NWS severe alerts into the timeline as pins. Phone-side only, like
-// RadarMode, so the watch never sees the setting. Defaults on through
-// numSetting's explicit default branch; do not copy wxMetric()'s `=== '1'`
-// idiom, which is a default-off read and would invert it.
+// Push NWS severe alerts into the timeline as pins. On by default only
+// through numSetting's explicit default branch.
 function timelineAlerts() {
-  return numSetting('TimelineAlerts', 1, 0, 1) === 1;
+  return numSetting('TimelineAlerts', 0, 1) === 1;
 }
 
-// `tl_pins` is the persisted record of what the timeline already holds, like
-// tx_hash. It needs no pendingHash-style companion because insertion is
-// synchronous: the commit lands before a duplicated heartbeat (QEMU's triple
-// REQUEST_IMAGES, or main.c's failed-decode and dropped-inbox re-requests)
-// can re-derive the same candidates. An asynchronous delivery route would
-// need that second record back.
-var tlState = null;        // parsed tl_pins map, lazily loaded
+// The parsed tl_pins map, the timeline's counterpart of tx_hash. It needs no
+// pendingHash-style companion only because insertTimelinePin is synchronous:
+// each commit lands before a duplicated heartbeat can plan again, and an
+// asynchronous delivery route would need that record back.
+var tlState = null;
 
-function tlLoadState() {
-  if (tlState) return tlState;
-  var s = localStorage.getItem('tl_pins');
-  if (s) { try { tlState = JSON.parse(s); } catch (e) { tlState = null; } }
-  if (!tlState || typeof tlState !== 'object') tlState = {};
-  return tlState;
-}
-
+// Swallows a quota throw, as writeWx does: this cache shares localStorage with
+// two base64 PNGs, and a throw must never escape into the alert path.
 function tlSaveState() {
-  // A null tlState means webviewclosed cleared the map; writing
-  // JSON.stringify(null) would resurrect the key the toggle removed.
-  if (!tlState) return;
-  // Same swallow-and-log policy as writeWx: this cache shares a localStorage
-  // with two base64 PNGs (bm_data, tx_replay), and a quota throw here must
-  // never escape into the alert path.
   try { localStorage.setItem('tl_pins', JSON.stringify(tlState)); }
   catch (e) { console.log('TL state write failed: ' + e); }
 }
 
-// Local pins only. Pebble.insertTimelinePin() builds the pin on the phone and
-// syncs it to the watch with no service in the loop, so it needs no timeline
-// token, API key or appstore listing.
-//
-// The timeline web API is deliberately not kept as a fallback. The new Pebble
-// app does not support it; it only intercepts its own JS's XHRs to
-// timeline-api.{rebble.io,getpebble.com}/v1/user/pins and turns them into
-// local pins, a shim the user can switch off ('Emulate Timeline Webservice')
-// and the docs tell new code not to lean on. A runtime without
-// insertTimelinePin (an old pkjs, or Rebble's own app, where a real service
-// still exists) therefore gets no pins, rather than this file carrying a
-// second delivery path with its own token lifecycle, 410 latch and HTTP
-// status ladder that nothing here can exercise.
-//
-// insertTimelinePin reports nothing (no callback, no status, no throw on a
-// rejected pin), so a commit here means only "did not throw". Committing
-// anyway is deliberate: never committing would re-insert every tracked pin on
-// every heartbeat forever.
+// Local pins through Pebble.insertTimelinePin() only, with no timeline web API
+// fallback: a runtime without it gets no pins.
 
 // Pushes what the alert list implies, or with `features` null (a failed fetch)
 // renews multi-day pins from tl_pins. fetchAlerts calls it only with the
 // setting on and after done(), so it cannot stall or alter the weather message.
 function pushTimelinePins(features) {
   var nowSec = Math.floor(Date.now() / 1000);
-  // The local midnight a multi-day pin's start steps to. It is read
-  // DAY_ROLL_SLACK_SEC ahead, so a beat just short of midnight takes that day.
+  // The local midnight a multi-day pin's start steps to, read
+  // DAY_ROLL_SLACK_SEC ahead so a beat just short of midnight takes that day.
   var day = new Date((nowSec + timeline.DAY_ROLL_SLACK_SEC) * 1000);
   day.setHours(0, 0, 0, 0);
   var dayStartSec = Math.floor(day.getTime() / 1000);
-  var st = tlLoadState();
+  var st = tlState || readWx('tl_pins');
   var plan = features ? timeline.planPins(features, st, nowSec, dayStartSec)
                       : timeline.renewPins(st, nowSec, dayStartSec);
   tlState = plan.state;
-  // Persists the GC, the first-seen anchors and the stored layouts. renewPins
-  // changes nothing, so a renewal writes only below, if it had pins to insert.
+  // A renewal changes no state, so it writes only below, if it had pins to
+  // insert.
   if (features) tlSaveState();
 
-  // planPins drops a Severe feature with no VTEC key silently, so this count
-  // is the only sign one exists. If it is ever non-zero in the field, revisit
-  // the decision rather than bolting on an unstable fallback id. Counted from
-  // the module's pure exports so planPins keeps its two-field contract.
+  // The only sign of a Severe feature planPins dropped for want of a VTEC key;
+  // if it is ever non-zero in the field, revisit that rather than add an
+  // unstable fallback id. Counted here so planPins keeps its two-field result.
   var noVtec = 0, tracked = 0, i, k;
   for (i = 0; features && i < features.length; i++) {
     var pr = features[i] && features[i].properties;
@@ -189,33 +162,33 @@ function pushTimelinePins(features) {
   for (k in tlState) {
     if (Object.prototype.hasOwnProperty.call(tlState, k)) tracked++;
   }
-  // Logged on every fetch, zero included: in clear weather this line is the
-  // only evidence the feature runs, and a broken read of the setting would
-  // otherwise look exactly like a quiet sky.
+  // Logged on every fetch, zero included: in clear weather it is the only
+  // evidence the feature runs at all.
   console.log('TL ' + plan.puts.length + ' pin(s) to ' +
               (features ? 'push' : 'renew') + ', ' + tracked + ' tracked' +
               (noVtec ? ', ' + noVtec + ' skipped with no VTEC key' : ''));
 
   if (!plan.puts.length) return;
   if (typeof Pebble.insertTimelinePin !== 'function') {
-    // Not an error: such a runtime never shows pins. Reached only when there
-    // is something to push, so this line's absence proves nothing about the
-    // runtime.
+    // Reached only with something to push, so this line's absence proves
+    // nothing about the runtime.
     console.log('TL insertTimelinePin unavailable on this runtime; no pins');
     return;
   }
-  // Per pin, not around the loop: one pin the runtime dislikes must not stop
-  // the rest of the plan, and a commit that already happened must survive it.
+  // Per pin, so one pin the runtime dislikes cannot stop the rest of the plan
+  // or undo a commit already made.
   plan.puts.forEach(function (p) {
     try {
       Pebble.insertTimelinePin(p.pin);
+      // The insert reports nothing, so a commit means only "did not throw";
+      // never committing would re-insert every tracked pin forever.
       timeline.commitPin(tlState, p.id, p.sig);
       console.log('TL pin ' + p.id + ' pushed, ' + p.pin.time + ' +' +
                   p.pin.duration + 'm');
     } catch (e) { console.log('TL push failed: ' + e); }
   });
-  // Once, after the loop. Every commit above is already in tlState, so a pin
-  // that threw is simply absent from it and the next heartbeat retries it.
+  // Once, after the loop: a pin that threw has no commit, so the next
+  // heartbeat retries it.
   tlSaveState();
 }
 
@@ -226,13 +199,13 @@ function pushTimelinePins(features) {
 var CHUNK = 4096;      // the inbox is 8200 B on all four platforms; the
                        // header tuples add ~50 B
 // The single-slot serialiser carries two kinds of work, dispatched on `kind`:
-//   {kind: 'img', bytes, hash, radarTime}  — chunked transfer of the composite
-//   {kind: 'msg', dict: {...}}             — one whole AppMessage
+//   {kind: 'img', bytes, hash, radarTime, key | replay}: a chunked composite
+//   {kind: 'msg', dict: {...}}: one whole AppMessage
 // The chunked protocol depends on strictly ordered ACKs, and firing an
 // unrelated sendAppMessage mid-transfer risks a NACK on the chunk in flight,
 // so every other AppMessage (settings, weather, Lat/Lon, RADAR_TIME, the size
 // query) must go through this same queue as a msg item.
-var tx = null;         // current item (+ offset/pending/retries while sending)
+var tx = null;         // current item (+ offset/retries while sending)
 var queue = [];        // pending items, in the order the work became ready
 var gen = 0;           // bumped when the bbox moves; stale fetches drop out
 // Hash of the composite currently queued or in flight. In memory only, and
@@ -240,17 +213,6 @@ var gen = 0;           // bumped when the bbox moves; stale fetches drop out
 // three times, and without this all three identical composites would enqueue
 // before the first one commits.
 var pendingHash = null;
-// Hash held by the tx_replay blob, as far as this pkjs session knows. In
-// memory only and deliberately pessimistic: a fresh session assumes nothing
-// and rewrites the blob at its first commit.
-var replayHash = null;
-// Hash of a composite actually delivered and ACKed since the watch last said
-// it had no frame. Deliberately narrower than tx_hash, which outlives both the
-// session and the watchface and so can describe a watch that has since
-// relaunched empty; this is cleared the moment a needImage request arrives and
-// re-earned by the next ACK. That is what lets a needImage pass skip a
-// composite it has already answered — see composeAndSend.
-var deliveredHash = null;
 
 function enqueue(item) {
   queue.push(item);
@@ -266,15 +228,11 @@ function pump() {
   send(tx);
 }
 
-// The dict for this item's next dispatch. A msg item is its whole payload; an
-// img item is one chunk, and building it also records where the transfer will
-// stand once the chunk is ACKed. That side effect is why dictFor() runs before
-// every dispatch, retries included: without a fresh t.pending the ACK cannot
-// advance the offset.
+// The dict for this item's next dispatch: a msg item's whole payload, or an
+// img item's chunk at t.offset.
 function dictFor(t) {
   if (t.kind === 'msg') return t.dict;
   var end = Math.min(t.offset + CHUNK, t.bytes.length);
-  t.pending = end;
   var d = {
     'IMG_OFFSET': t.offset,
     // Must be a plain Array of numbers: a raw Uint8Array is not reliably
@@ -303,10 +261,10 @@ function send(t) {
 function onAck(t) {
   if (t !== tx) return;
   t.retries = 0;                  // per chunk, not per transfer
-  // A msg item is done at its first ACK — and has no .bytes to test, so this
+  // A msg item is done at its first ACK and has no .bytes to test, so this
   // must come first.
   if (t.kind !== 'msg') {
-    t.offset = t.pending;
+    t.offset += CHUNK;
     if (t.offset < t.bytes.length) {
       send(t);
       return;
@@ -320,29 +278,19 @@ function onAck(t) {
     // Only here, never at enqueue time: a transfer that dies halfway must not
     // poison the cache into skipping forever.
     try { localStorage.setItem('tx_hash', t.hash); } catch (e) {}
-    deliveredHash = t.hash;
-    // Keep the bytes too, so a relaunched watch can be filled without a fix,
-    // fetch and blend (see replayComposite). One key holds bbox, hash, stamp
-    // and bytes: a replay is correct only if all four agree, and separate
-    // keys could be left disagreeing by a partial write. A quota throw leaves
-    // the previous blob intact.
-    // bm_key is this composite's own bbox: resetTransfers() drops an
-    // in-flight img when the area moves, and the t !== tx guard keeps a
-    // dropped transfer from reaching here.
-    // replayHash, not tx_hash, gates the rewrite: tx_hash survives a pkjs
-    // restart, so testing it would skip the write whenever the watch already
-    // held these bytes, the common case, and leave the blob absent or stale
-    // forever. Set only after the write succeeds, so a quota failure retries
-    // on the next commit.
-    if (replayHash !== t.hash) {
+    // The bytes too, for replayComposite. One key holds bbox, hash, stamp and
+    // bytes, because a replay is correct only if all four agree; a quota throw
+    // leaves the previous blob intact. t.key is the bbox this composite was
+    // built for, never bm_key, which a failed basemap write leaves naming the
+    // previous place.
+    if (!t.replay) {
       try {
         localStorage.setItem('tx_replay', JSON.stringify({
-          k: localStorage.getItem('bm_key'),
+          k: t.key,
           h: t.hash,
           t: t.radarTime,
           d: b64encode(t.bytes)
         }));
-        replayHash = t.hash;
       } catch (e) {
         console.log('Replay cache write failed: ' + e);
       }
@@ -394,10 +342,10 @@ function resetTransfers(newArea) {
 function clearTxHash() {
   pendingHash = null;
   try { localStorage.removeItem('tx_hash'); } catch (e) {}
-  // tx_replay is deliberately not dropped here. tx_hash means "the watch is
-  // displaying these bytes", which is what became unknown; tx_replay means
-  // "this is the last composite we know landed, for bbox k", which is still
-  // true — and its key gate, not this flag, is what makes replaying it safe.
+  // tx_replay is deliberately kept. tx_hash means "the watch is displaying
+  // these bytes", which is what became unknown; tx_replay means "the last
+  // composite we know landed, for bbox k", which is still true, and its key
+  // gate is what makes replaying it safe.
 }
 
 // Fill a watch that has no frame from the last composite we delivered, instead
@@ -409,24 +357,17 @@ function clearTxHash() {
 //
 // Two rules keep it honest. It replays only a composite built for this bbox:
 // a move or a zoom change finds no match and the face stays grey rather than
-// showing the wrong place. And it re-sends the stored
-// radar stamp, never `now`, so the Radar Age slot dates the pixels on screen.
+// showing the wrong place. And it re-sends the stored radar stamp, never
+// `now`, so the Radar Age slot dates the pixels on screen.
 function replayComposite(key) {
-  var raw = localStorage.getItem('tx_replay');
-  if (!raw) return;
-  var r;
-  try { r = JSON.parse(raw); } catch (e) { return; }
+  var r = readWx('tx_replay');
   if (!r || r.k !== key) return;
-  // QEMU delivers each REQUEST_IMAGES up to three times; without this the same
-  // replay would queue up behind itself.
-  if (r.h === pendingHash) return;
-  // The blob on disk holds exactly these bytes, so this replay's own ACK must
-  // not rewrite it.
-  replayHash = r.h;
   var bytes = b64decode(r.d);
   console.log('Replaying last composite, ' + bytes.length + ' B, hash ' + r.h);
   pendingHash = r.h;
-  enqueue({ kind: 'img', bytes: bytes, hash: r.h, radarTime: r.t });
+  // The blob on disk already holds these bytes, so this item's ACK must not
+  // rewrite it.
+  enqueue({ kind: 'img', bytes: bytes, hash: r.h, radarTime: r.t, replay: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -547,21 +488,19 @@ function exportUrl(base, bbox, transparent) {
 }
 
 // ---------------------------------------------------------------------------
-// Weather (slots 15-31) — NWS JSON API, api.weather.gov. No key, no provider.
+// Weather (slots 15-31): the NWS JSON API at api.weather.gov, no key.
 // 15-28 and 31 are fetched; 29-30 (sun times) are computed here from the
-// location.
-// Every string is assembled, unit-converted, abbreviated and width-fitted
-// here. The watch receives finished strings, two alert expiries, the fetch
-// time, and four sun instants that it formats itself.
+// location. Every string is assembled, unit-converted, abbreviated and
+// width-fitted here. The watch receives finished strings, two alert expiries,
+// the fetch time, and four sun instants that it formats itself.
 // ---------------------------------------------------------------------------
 
 var WX_BASE = 'https://api.weather.gov';
 
-// Which WX_* string each weather slot code displays. This is the one place a
-// weather slot is registered: WX_SLOTS, the per-string width budgets and the
-// per-resource fetch gates are all derived from it. Hand-synced code lists
-// drift silently: a code missing from a fetch gate stops that resource being
-// fetched while assembleWx still tries to build its string.
+// Which WX_* string each weather slot code displays: the one place a weather
+// slot is registered. WX_SLOTS, the per-string width budgets and the
+// per-resource fetch gates all derive from it, because a hand-synced code
+// list drifts silently.
 var WX_SLOT_STRINGS = {
   15: ['cond'],   16: ['fcst'],           17: ['hilo'],
   18: ['alert'],  19: ['alert2'],
@@ -570,18 +509,16 @@ var WX_SLOT_STRINGS = {
   31: ['alert', 'alert2', 'cond'],        // alert, else upcoming, else conditions
   22: ['temp'],   23: ['feels'],          24: ['dew'],
   25: ['hum'],    26: ['wind'],           27: ['pres'],
-  28: ['fcst2'],                          // the SECOND forecast period
-  // The sun group is the one set of values this file does not format: they
-  // travel as epoch seconds because 12/24-hour (clock_is_24h_style()) is a
-  // watch setting the phone never sees. They are registered here anyway,
-  // since WX_SLOTS and slotsFrom('sun') both derive from this table.
+  28: ['fcst2'],                          // the second forecast period
+  // Sun times travel as epoch seconds for the watch to format, since
+  // 12/24-hour never leaves the watch, but are registered here so WX_SLOTS
+  // and slotsFrom('sun') include them.
   29: ['daylight'], 30: ['gold']
 };
 
-// Which fetched resource feeds each string. 'sun' is computed here rather than
-// fetched, so no interval gate uses it, but slotsFrom('sun') still needs the
-// name to gate the computation. A string missing from this table is silently
-// never fetched or computed.
+// Which resource feeds each string. 'sun' is computed rather than fetched,
+// but slotsFrom('sun') gates the computation. A string missing from this
+// table is silently never fetched or computed.
 var WX_STRING_SOURCE = {
   cond: 'obs', fcst: 'fcst', hilo: 'fcst', alert: 'alerts', alert2: 'alerts',
   temp: 'obs', feels: 'obs', dew: 'obs', hum: 'obs', wind: 'obs', pres: 'obs',
@@ -614,27 +551,30 @@ function slotsFrom(src) {
 var lastLat = null;   // last rounded fix, for a units-change refetch
 var lastLon = null;
 
-// [slotCode, fontCode] for each of the four lines in display order, from the
-// persisted cfg2 blob; budgetFor() reads the index as the line's position.
-// The parse is guarded, so a truncated blob cannot throw out of 'ready' and
-// take the imagery fetch down with the weather: no blob, or a bad one, reads
-// as "no lines configured".
+// The [slot, font] messageKeys of the four lines, in display order.
+// TopSlot/TopFont drive Top Line 2 and BottomSlot/BottomFont Bottom Line 1:
+// the names are historical, and renaming a messageKey resets every saved
+// config.
+var LINE_KEYS = [['TopSlot1', 'TopFont1'], ['TopSlot', 'TopFont'],
+                 ['BottomSlot', 'BottomFont'], ['BottomSlot2', 'BottomFont2']];
+
+// [slotCode, fontCode] for each line in display order, from the persisted
+// cfg2 blob; budgetFor() reads the index as the line's position. No blob, or
+// an unparsable one, reads as no lines configured rather than throwing out of
+// 'ready'.
 function wxLines() {
-  var lines = [];                             // fresh install / bad blob:
-  var c = localStorage.getItem('cfg2');       // Time/Date defaults
-  if (c) {
-    try {
-      var d = JSON.parse(c);
-      lines = [[d.TopSlot1, d.TopFont1], [d.TopSlot, d.TopFont],
-               [d.BottomSlot, d.BottomFont], [d.BottomSlot2, d.BottomFont2]];
-    } catch (e) {}
-  }
-  return lines;
+  var d = readWx('cfg2');
+  return d ? LINE_KEYS.map(function (k) { return [d[k[0]], d[k[1]]]; }) : [];
 }
 
 // True when any configured line displays one of these slot codes.
 function wxUses(codes) {
   return wxLines().some(function (l) { return codes.indexOf(l[0]) >= 0; });
+}
+
+// True when any configured line displays a string fed by resource `src`.
+function wxWants(src) {
+  return wxUses(slotsFrom(src));
 }
 
 // True when a weather slot is actually configured. pkjs sends the watch nothing
@@ -647,9 +587,9 @@ function wxNeeded() {
 }
 
 // Chars that fit, indexed [fontIdx = XS..XL, Super Large]. Estimates,
-// deliberately a little wide — fitWx() truncates and the watch-side ellipsis
-// is the safety net (see fitWx, below). Super Large scales Extra Large's
-// budget by the two fonts' mean glyph advance (16.8 vs 21.5 px).
+// deliberately a little wide: fitWx() truncates and the watch-side ellipsis
+// is the safety net. Super Large scales Extra Large's budget by the two
+// fonts' mean glyph advance (16.8 vs 21.5 px).
 var CHAR_BUDGET_144 = [18, 16, 12, 10, 7, 5];
 var CHAR_BUDGET_200 = [25, 22, 16, 14, 10, 7];
 
@@ -680,7 +620,8 @@ function budgetTable(i) {
 // would make the string always fit at the ceiling, so the shrink would never
 // fire. The 31-char cap still applies: both minimums start there, and
 // capBytes backs it up.
-function budgetFor(codes) {
+function budgetFor(str) {
+  var codes = slotsShowing(str);
   var best = 31;
   var autoBest = 31;
   var anyAuto = false;
@@ -688,7 +629,7 @@ function budgetFor(codes) {
     if (codes.indexOf(l[0]) < 0) return;
     var table = budgetTable(i);
     if (table[0] < autoBest) autoBest = table[0];
-    // Font codes as main.c's slot_font_raw() documents them.
+    // Font codes as main.c documents them on Settings.fonts.
     var f = l[1];
     if ((f >= 5 && f <= 9) || f === 11) { anyAuto = true; return; }
     if (f === 10) f = 5;
@@ -779,10 +720,8 @@ function capBytes(s) {
 // observation arrives in degC; forecast periods arrive in degF.
 //
 // One setting drives every unit on the face: a user who asked for Celsius
-// wants km/h and millibars with it. Phone-side only, like Zoom. The messageKey
-// stays 'WxUnits' with values 0/1, because renaming a Clay key resets every
-// saved config.
-function wxMetric() { return localStorage.getItem('WxUnits') === '1'; }
+// wants km/h and millibars with it.
+function wxMetric() { return numSetting('WxUnits', 0, 1) === 1; }
 
 function fmtTempFromC(c) {
   return String(Math.round(wxMetric() ? c : c * 9 / 5 + 32)) + '°';
@@ -800,16 +739,11 @@ function obsVal(o) {
 
 function isNum(v) { return typeof v === 'number' && isFinite(v); }
 
-// Pick the longest form that fits the budget.
-//
-// Numeric slots use this rather than fitWx, whose tail truncation turns a
-// number into a different, plausible value ('Feels 78°' cut to 7 chars reads
-// 'Feels 7'). Their last rungs fit a budget of 7, which covers every size
-// but Extra Large on gabbro's outer lines (6) and Super Large on the 144 px
-// table (5) and on gabbro's outer lines (3). Wind's overruns 5 ('WSW 12'),
-// and at 3 most rungs do; High / Low's ('H82') fits 3 for two-digit
-// temperatures. An overrunning last rung is returned anyway for the watch's
-// ellipsis.
+// The longest form that fits the budget, else the last form for the watch's
+// ellipsis to cut. Numeric slots use this rather than fitWx, whose tail cut
+// turns a number into a different, plausible one ('Feels 78°' cut to 7 reads
+// 'Feels 7'). A ladder's last rung should fit a budget of 7, which covers
+// every size but the smallest budgets in the tables.
 function pickWx(forms, budget) {
   for (var i = 0; i < forms.length; i++) {
     if (forms[i].length <= budget) return forms[i];
@@ -826,7 +760,8 @@ function compass(deg) {
   return WIND_DIRS[Math.round((((deg % 360) + 360) % 360) / 22.5) % 16];
 }
 
-// localStorage JSON helpers for the per-resource caches.
+// JSON values in localStorage. readWx gives null for a missing or unparsable
+// value; writeWx swallows a quota throw.
 function readWx(key) {
   var s = localStorage.getItem(key);
   if (!s) return null;
@@ -849,11 +784,8 @@ function dropWxCaches() {
   localStorage.removeItem('wx_alerts');
 }
 
-function parseEpoch(s) {
-  if (!s) return 0;
-  var ms = Date.parse(s);
-  return isNaN(ms) ? 0 : Math.floor(ms / 1000);
-}
+// An NWS date string to epoch seconds, 0 when absent or unparsable.
+var parseEpoch = timeline.parseEpochSec;
 
 // Shared JSON fetch. Read responseText, not response: the pkjs bridge yields
 // a usable ArrayBuffer only on the first read of .response (see fetchPng);
@@ -891,8 +823,8 @@ function fetchJson(url, cb) {
   xhr.send();
 }
 
-// 429/5xx/timeout: keep the previous payload, retry on the next heartbeat —
-// the heartbeat is already the backoff. A 403 with a problems/ body is the
+// 429/5xx/timeout: keep the previous payload and retry on the next heartbeat,
+// which is already the backoff. A 403 with a problems/ body is the
 // diagnostic signature of a rejected User-Agent: a configuration bug, not a
 // transient one, so log it loudly.
 function logWxFail(what, status, obj) {
@@ -917,17 +849,16 @@ function markNoCoverage(lkey) {
   dropWxCaches();
 }
 
-// /points → grid + station ids: fetched once per rounded location, ever —
-// max-age ~24 h and a grid cell never moves. Keyed by the same 2-decimal
-// rounded lat/lon the basemap cache uses.
+// /points → grid + station ids, fetched once per rounded location: a grid
+// cell never moves. Keyed by the same 2-decimal rounded lat/lon the basemap
+// cache uses.
 function getGrid(lkey, cb) {
   var g = readWx('wx_grid');
   if (g && g.k === lkey) { cb(g); return; }
   fetchJson(WX_BASE + '/points/' + lkey, function (status, obj) {
-    // No coverage is status plus the problems/InvalidPoint body: a
-    // bare 404 from a deploy blip or an intercepting proxy at a perfectly
-    // valid US point must not latch weather off until the location changes.
-    // It falls through to the transient-failure path and retries instead.
+    // No coverage is status plus the problems/InvalidPoint body: a bare 404
+    // from a deploy blip or an intercepting proxy must not latch weather off
+    // at a valid US point, so it takes the transient-failure path instead.
     if (status === 404 && obj &&
         String(obj.type || '').indexOf('InvalidPoint') >= 0) {
       markNoCoverage(lkey);
@@ -939,30 +870,21 @@ function getGrid(lkey, cb) {
       cb(null);
       return;
     }
-    var fcstUrl = obj.properties.forecast;
     var stUrl = obj.properties.observationStations;
-    if (!stUrl) {
-      cb({ k: lkey, fcst: fcstUrl, st: [] });   // not cached: retry next time
-      return;
-    }
+    // wx_grid never expires, so a partial grid, one with no forecast URL or
+    // no stations, serves this pass uncached and is retried next heartbeat:
+    // cached, it would kill those slots at this location forever.
+    g = { k: lkey, fcst: obj.properties.forecast, st: [] };
+    if (!stUrl) { cb(g); return; }
     fetchJson(stUrl + '?limit=3', function (s2, o2) {
       if (s2 !== 200 || !o2 || !o2.features) {
         logWxFail('stations', s2, o2);
-        // Usable for the forecast this pass, but not cached, so the station
-        // list is retried on the next heartbeat.
-        cb({ k: lkey, fcst: fcstUrl, st: [] });
+        cb(g);
         return;
       }
-      var st = o2.features.slice(0, 3).map(function (f) { return f.id; })
-                 .filter(function (u) { return !!u; });
-      g = { k: lkey, fcst: fcstUrl, st: st };
-      // wx_grid never expires, so a partial /points response must
-      // not be cached: an entry with no forecast URL (or no stations) would
-      // silently kill those slots at this location forever. Usable this
-      // pass, retried on the next heartbeat — same treatment as !stUrl.
-      if (fcstUrl && st.length) {
-        writeWx('wx_grid', g);
-      }
+      g.st = o2.features.slice(0, 3).map(function (f) { return f.id; })
+               .filter(function (u) { return !!u; });
+      if (g.fcst && g.st.length) writeWx('wx_grid', g);
       cb(g);
     });
   });
@@ -988,22 +910,16 @@ function obsRecord(p) {
   };
 }
 
-// True when a record carries any numeric at all, description aside. wd and wg
-// are deliberately absent: neither is ever rendered on its own (WX_WIND needs
-// isNum(obs.ws) first), so a station reporting only a wind direction has
-// nothing any slot could display.
-function obsHasValue(r) {
-  return isNum(r.temp) || isNum(r.dp) || isNum(r.rh) || isNum(r.ws) ||
-         isNum(r.hi) || isNum(r.wc) || isNum(r.pr);
-}
-
 // Rank a fall-through candidate that lacks a temperature: a description and
 // numbers beats a description alone, which beats numbers alone, which beats
 // nothing. Ties keep the earlier, nearer station. A fresh station that
 // reports a temperature is taken outright by fetchObs() before any ranking,
-// even with an empty textDescription.
+// even with an empty textDescription. wd and wg do not count as numbers: no
+// slot renders either without isNum(obs.ws).
 function obsScore(r) {
-  return (r.desc ? 2 : 0) + (obsHasValue(r) ? 1 : 0);
+  var nums = isNum(r.temp) || isNum(r.dp) || isNum(r.rh) || isNum(r.ws) ||
+             isNum(r.hi) || isNum(r.wc) || isNum(r.pr);
+  return (r.desc ? 2 : 0) + (nums ? 1 : 0);
 }
 
 // Observation: the latest from the nearest station whose report is at most
@@ -1013,21 +929,19 @@ function obsScore(r) {
 function fetchObs(stations, cb) {
   var partial = null;
   var any200 = false;
+  function finish(rec) {
+    if (rec) {
+      rec.t = Date.now();
+      writeWx('wx_obs', rec);
+    }
+    cb();
+  }
   function next(i) {
     if (i >= stations.length) {
-      if (partial) {
-        partial.t = Date.now();
-        writeWx('wx_obs', partial);
-      } else if (any200) {
-        // The stations answered but nothing was usable: render '--'. An
-        // all-null record, not a hand-built pair, so every field a slot may
-        // read is present and explicitly empty.
-        var empty = obsRecord({});
-        empty.t = Date.now();
-        writeWx('wx_obs', empty);
-      }
-      // else: every request failed — keep the previous data, retry next beat.
-      cb();
+      // Stations that answered with nothing usable write an all-null
+      // obsRecord, every field present, so each slot renders '--'. When every
+      // request failed, the previous record stays for the next beat to retry.
+      finish(partial || (any200 ? obsRecord({}) : null));
       return;
     }
     fetchJson(stations[i] + '/observations/latest', function (status, obj) {
@@ -1038,9 +952,7 @@ function fetchObs(stations, cb) {
         if (!isNaN(ts) && Date.now() - ts <= 2 * 3600 * 1000) {
           var rec = obsRecord(p);
           if (rec.temp !== null) {
-            rec.t = Date.now();
-            writeWx('wx_obs', rec);
-            cb();
+            finish(rec);
             return;
           }
           if (obsScore(rec) > (partial ? obsScore(partial) : 0)) partial = rec;
@@ -1075,7 +987,7 @@ function fetchFcst(url, cb) {
 }
 
 // Alerts: one response, two filters (active already includes future onsets).
-// Refetched every heartbeat — max-age=5, this is the time-critical one.
+// Refetched every heartbeat: max-age=5, and this is the time-critical one.
 var WX_SEV = { Extreme: 4, Severe: 3, Moderate: 2, Minor: 1 };
 var WX_URG = { Immediate: 3, Expected: 2, Future: 1 };
 
@@ -1083,10 +995,9 @@ function fetchAlerts(lkey, cb) {
   fetchJson(WX_BASE + '/alerts/active?point=' + lkey + '&status=actual',
             function (status, obj) {
     // Raw features, kept only for the timeline push. The persisted wx_alerts
-    // blob keeps its five-field shape exactly: no pin is ever built from it, so
-    // an entry written by an older build can never produce a malformed pin,
-    // and multi-KB NWS descriptions never enter a localStorage that already
-    // holds two base64 PNGs.
+    // blob keeps its five-field shape and no pin is ever built from it, so a
+    // cached entry can never produce a malformed pin, and multi-KB NWS
+    // descriptions stay out of a localStorage that holds two base64 PNGs.
     var raw = null;
     // Set only by a failed fetch, which still has to step multi-day pins.
     var renew = false;
@@ -1140,17 +1051,21 @@ function minExpiry(list) {
   return m;
 }
 
-// "{event} +{n}": the title is fitted to the budget minus the suffix, so the
-// count is never the part that gets truncated.
-function alertLine(event, n, budget) {
-  var suffix = n > 0 ? ' +' + n : '';
+// "{event}{suffix}": the title is fitted to the budget minus the suffix, so
+// the count or lead time is never the part that gets truncated.
+function alertLine(event, suffix, budget) {
   return fitWx(event, budget - suffix.length) + suffix;
+}
+
+// ' +n' for the alerts in `list` behind the first, whose title shows.
+function moreSuffix(list) {
+  return list.length > 1 ? ' +' + (list.length - 1) : '';
 }
 
 // Lead time is relative (an absolute clock time would need the watch's 12/24
 // preference, which never leaves the watch): 'in 45m' under an hour, 'in 2d'
 // over 24 h, 'in 3h' between.
-// The unit is chosen AFTER rounding, so a rounded value can never overflow
+// The unit is chosen after rounding, so a rounded value can never overflow
 // its own bucket: 59m45s is '1h', not '60m'; 23h59m is '1d', not '24h'.
 function fmtLead(dtSec) {
   var m = Math.max(1, Math.round(dtSec / 60));
@@ -1167,24 +1082,23 @@ function buildAlertStrings(feats, nowSec) {
 
   var a = '', aExp = 0;
   if (active.length) {
-    a = alertLine(active[0].e, active.length - 1, budgetFor(slotsShowing('alert')));
+    a = alertLine(active[0].e, moreSuffix(active), budgetFor('alert'));
     aExp = minExpiry(active);
   }
 
   var a2 = '', a2Exp = 0;
   if (all.length) {
     var top = all[0];
-    var b2 = budgetFor(slotsShowing('alert2'));
+    var b2 = budgetFor('alert2');
     if (top.on && top.on > nowSec) {
       // The lead time replaces +n, so this string describes one alert and
       // WX_EXP2 is that alert's own expiry, not the set minimum: a short-lived
       // Minor advisory must not blank a future Severe watch hours before it
       // lapses.
-      var suffix = ' in ' + fmtLead(top.on - nowSec);
-      a2 = fitWx(top.e, b2 - suffix.length) + suffix;
+      a2 = alertLine(top.e, ' in ' + fmtLead(top.on - nowSec), b2);
       a2Exp = top.ex;
     } else {
-      a2 = alertLine(top.e, all.length - 1, b2);
+      a2 = alertLine(top.e, moreSuffix(all), b2);
       a2Exp = minExpiry(all);
     }
   }
@@ -1192,47 +1106,34 @@ function buildAlertStrings(feats, nowSec) {
 }
 
 // ---------------------------------------------------------------------------
-// Sun times (slots 29-30): computed here, formatted on the watch.
-//
-// The only displayed weather values the phone does not format: 12/24-hour is
-// clock_is_24h_style(), which never leaves the watch, so they cross as int32
-// epoch seconds (also cheaper than four 32-byte buffers). SunCalc is pure
-// math over the location, so nothing is fetched for them.
+// Sun times (slots 29-30): computed here from the location, formatted on the
+// watch. They cross as int32 epoch seconds because 12/24-hour
+// (clock_is_24h_style()) never leaves the watch.
 // ---------------------------------------------------------------------------
 
-// Epoch seconds, or 0 when the event does not occur.
-//
-// Above the Arctic Circle, which NWS covers in Alaska, SunCalc returns an
-// Invalid Date during polar day and polar night. Its getTime() is NaN, which
-// would marshal into the int32 tuple as garbage rather than as "no event".
+// Epoch seconds, or 0 when the event does not occur. In polar day and night,
+// which NWS covers in Alaska, SunCalc returns an Invalid Date whose NaN would
+// marshal into the int32 tuple as garbage rather than as "no event".
 function sunSec(d) {
   if (!d) return 0;
   var ms = d.getTime();
   return isFinite(ms) ? Math.floor(ms / 1000) : 0;
 }
 
-// SunCalc's "day" is anchored on local solar noon, not UTC: getTimes() at
-// 19:30 local still returns that evening's sunset. Events it returns can
-// therefore be in the past, and the scans walk forward until one is not.
-// Day -1 serves nextGolden(), where a high-latitude window can be in progress
-// across a solar-day boundary; nextDaylight() cannot use it, but one spare
-// getTimes() call is not worth a second array.
-//
-// Six days forward because near a polar transition consecutive solar days
-// skip the event entirely (up to 4.97 d to the next sunrise at Utqiagvik). A
-// short scan fails silently: it returns 0 and the slot reads '--'. The scan
-// is pure arithmetic, so the reach is close to free.
+// SunCalc's day is anchored on local solar noon, not UTC, so events it
+// returns can be past and the scans walk forward until one is not. Day -1
+// serves nextGolden(), where a high-latitude window can be in progress across
+// a solar-day boundary. Six days forward because near a polar transition
+// consecutive solar days skip an event entirely (up to 4.97 d to the next
+// sunrise at Utqiagvik), and a short scan silently reads '--'.
 var SUN_DAYS = [-1, 0, 1, 2, 3, 4, 5, 6];
 
 // The daylight window to show, as [sunrise, sunset] epoch seconds, taken as
 // a pair from the first solar day whose sunset is still ahead. Resolving each
 // to its own next occurrence would, once today's sunrise passes, pair
-// tomorrow's sunrise with today's sunset and render a backwards span. A day
-// in progress keeps its own sunrise; the slot rolls to tomorrow after sunset.
-//
-// Unlike nextGolden, no cross-day pairing is needed: SunCalc derives sunrise
-// and sunset from one solve, so a solar day has both or neither. Both absent
-// is polar day or polar night, which the watch renders as '--'.
+// tomorrow's sunrise with today's sunset and render a backwards span. SunCalc
+// solves both in one call, so a day has both or neither and no cross-day
+// pairing is needed; neither is polar day or night, which renders as '--'.
 function nextDaylight(lat, lon, nowSec) {
   for (var i = 0; i < SUN_DAYS.length; i++) {
     var t = SunCalc.getTimes(new Date((nowSec + SUN_DAYS[i] * 86400) * 1000),
@@ -1243,24 +1144,13 @@ function nextDaylight(lat, lon, nowSec) {
   return [0, 0];
 }
 
-// The golden hour window to show, as [start, end] epoch seconds.
-//
-// Built from boundaries rather than same-call pairs. The sun is golden
-// between -0.833 deg (sunrise/sunset) and +6 deg, so a window opens at
-// sunrise or goldenHour (the evening descent through 6 deg) and closes at
-// goldenHourEnd (the morning climb through 6 deg) or sunset. Collect every
-// valid boundary across the scan, sort by time, and the windows are the
-// adjacent open->close pairs.
-//
-// Pairing within one getTimes() call blanks the slot for weeks at high
-// latitudes inside NWS coverage, in two ways:
-//
-//   1. When the sun rises but never reaches 6 deg (Anchorage, Fairbanks),
-//      both golden fields are Invalid while sunrise/sunset stay valid, yet
-//      the whole short day is golden.
-//   2. During polar day (Utqiagvik) sunrise/sunset are Invalid, and one
-//      call's goldenHour and goldenHourEnd sit ~21 h apart in different
-//      windows. The real window pairs goldenHour(d) with goldenHourEnd(d+1).
+// The golden hour window to show, as [start, end] epoch seconds, built from
+// sorted boundaries rather than same-call pairs. A window opens at sunrise or
+// goldenHour and closes at goldenHourEnd or sunset, and the windows are the
+// adjacent open->close pairs across the scan. Same-call pairing blanks the
+// slot for weeks inside NWS coverage: where the sun rises but never reaches
+// 6 deg both golden fields are invalid though the whole day is golden, and in
+// polar day the real window pairs goldenHour(d) with goldenHourEnd(d+1).
 function nextGolden(lat, lon, nowSec) {
   var ev = [];
   for (var i = 0; i < SUN_DAYS.length; i++) {
@@ -1269,29 +1159,18 @@ function nextGolden(lat, lon, nowSec) {
     var marks = [[sunSec(t.sunrise), 1], [sunSec(t.goldenHourEnd), 0],
                  [sunSec(t.goldenHour), 1], [sunSec(t.sunset), 0]];
     for (var j = 0; j < marks.length; j++) {
-      // Third element is the scan day the boundary came from; see the
-      // adjacency test below. 0 = the event does not occur.
+      // [time, opens, scan day]; a 0 time means the event does not occur.
       if (marks[j][0]) ev.push([marks[j][0], marks[j][1], i]);
     }
   }
   ev.sort(function (a, b) { return a[0] - b[0]; });
   // Ascending, so the first qualifying pair is the earliest window that has
-  // not ended, and a window in progress stays on screen.
-  //
-  // The two boundaries must come from the same or an adjacent scan day.
-  // Around |lat| 72.58 the midnight-sun minimum altitude drifts across +6 deg
-  // mid-scan, so several consecutive days keep the sun above the golden band
-  // all day and yield neither mark. Without the test a dangling goldenHour
-  // pairs with a goldenHourEnd five or six days later, a multi-day "golden
-  // hour" with the sun far above 6 deg.
-  //
-  // Adjacency is exactly the right bound: a normal window and the all-day
-  // case close within their own day, and the polar-day window pairs
-  // goldenHour(d) with goldenHourEnd(d+1). A +86400 s step advances SunCalc's
-  // julianCycle by exactly 1, so the index difference is the solar-day
-  // difference. Only the polar-day edge can strand an open. At the polar-night
-  // edge sunrise and sunset come from one solve, so a day has both or neither
-  // and self-closes.
+  // not ended, and a window in progress stays on screen. The two boundaries
+  // must come from the same or an adjacent scan day: near |lat| 72.58 several
+  // consecutive days yield no boundary, and a dangling goldenHour would pair
+  // with a goldenHourEnd days later. Adjacency is exactly the polar-day
+  // window's reach, since a +86400 s step advances SunCalc's julianCycle by
+  // exactly 1, and a wider reach readmits bogus windows.
   for (var k = 0; k + 1 < ev.length; k++) {
     if (ev[k][1] === 1 && ev[k + 1][1] === 0 &&
         ev[k + 1][0] > ev[k][0] && ev[k + 1][0] > nowSec &&
@@ -1306,13 +1185,11 @@ function nextGolden(lat, lon, nowSec) {
 // ~600 B against the 8,200 B inbox. Slots 20, 21 and 31 add nothing; the
 // watch composes them from strings already sent.
 //
-// WX_TIME is the fetch time, not the assembly time. This payload is re-sent
-// every heartbeat and replayed on 'ready' even when every fetch failed, so
-// stamping 'now' would relabel hour-old data as fresh and the watch's 3-hour
-// '--' guard could never fire. Only the observation and forecast feed
-// fmt_wx's staleness check (alerts carry WX_EXP), so the stamp is the oldest
-// fetch time among those two that a configured line displays: an
-// unconfigured resource going stale in the cache must not blank fresh lines.
+// WX_TIME is the oldest fetch time among the observation and forecast that a
+// configured line displays, never the assembly time: this payload is re-sent
+// and replayed even when every fetch failed, and stamping now would keep the
+// watch's 3-hour '--' guard from ever firing. Alerts carry WX_EXP instead, and
+// an unconfigured resource going stale in the cache must not blank fresh lines.
 function assembleWx(lat, lon) {
   var nowSec = Math.floor(Date.now() / 1000);
   var tOldest = 0;   // ms; 0 = no timed resource contributed
@@ -1322,44 +1199,36 @@ function assembleWx(lat, lon) {
     'WX_TEMP': '', 'WX_FEELS': '', 'WX_DEW': '', 'WX_HUM': '',
     'WX_WIND': '', 'WX_PRES': '', 'WX_FCST2': '',
     // Epoch seconds; 0 = no such event (polar day/night), which the watch
-    // renders as '--'. Not strings — see the sun-times section above.
+    // renders as '--'.
     'WX_SUNRISE': 0, 'WX_SUNSET': 0, 'WX_GOLD1': 0, 'WX_GOLD2': 0,
     'WX_EXP': 0, 'WX_EXP2': 0, 'WX_TIME': nowSec
   };
 
-  // Each cache is read only when a configured line displays one of the
-  // strings it feeds. The caches outlive a slot change (dropWxCaches runs
-  // only on a location change or no-coverage), so without this a resource
-  // cached under a previous config would ride every payload indefinitely.
-  // Gate on slotsFrom('obs'), not slotsShowing('cond'): one observation
-  // feeds seven strings.
-  var obs = wxUses(slotsFrom('obs')) ? readWx('wx_obs') : null;
+  // Each cache is read only when a configured line displays a string it
+  // feeds: the caches outlive a slot change, so one cached under an earlier
+  // config would otherwise ride every payload. Gate on the resource, not on
+  // 'cond': one observation feeds seven strings.
+  var obs = wxWants('obs') ? readWx('wx_obs') : null;
   if (obs) {
-    // "{temp}° {description}"; either half may be missing. Both missing: send
-    // nothing and let the watch render '--', the same contract WX_HILO uses
-    // below. The no-data glyph is chosen in exactly one place, on the watch.
-    var b = budgetFor(slotsShowing('cond'));
-    var t = (obs.temp === null || obs.temp === undefined)
-              ? '' : fmtTempFromC(obs.temp);
+    // "{temp}° {description}"; either half may be missing. With both missing
+    // the string stays empty and the watch, the one place the no-data glyph is
+    // chosen, renders '--'.
+    var b = budgetFor('cond');
+    var t = isNum(obs.temp) ? fmtTempFromC(obs.temp) : '';
     var desc = obs.desc ? fitWx(obs.desc, t ? b - t.length - 1 : b) : '';
-    pl['WX_COND'] = capBytes(t && desc ? t + ' ' + desc : (t || desc));
+    pl['WX_COND'] = t && desc ? t + ' ' + desc : (t || desc);
 
-    // The six single-value strings below share that one cache read, so they
-    // carry the same observation instant. They are built whether or not their
-    // slot is configured: an unconfigured budget resolves to the 31-char
-    // ceiling, and the extra keys cost ~130 B of the 8,200 B inbox, cheaper
-    // than six more gates to keep in sync.
-    // The one numeric string with no ladder: at most 5 characters ('-100°'),
-    // it fits every budget but Super Large on gabbro's outer lines (3).
-    if (isNum(obs.temp)) {
-      pl['WX_TEMP'] = capBytes(fmtTempFromC(obs.temp));
-    }
+    // The six single-value strings share that one read, so they carry the
+    // same observation instant. They are built whether or not their slot is
+    // configured: an unconfigured budget is the 31-char ceiling, and the
+    // extra keys cost less than six more gates to keep in sync.
+    // Temperature needs no ladder: at most 5 characters ('-100°'), it fits
+    // every budget but Super Large on gabbro's outer lines (3).
+    pl['WX_TEMP'] = t;
     // Feels Like takes heat index or wind chill only when it moves in that
-    // correction's own direction, else the plain temperature. Testing
-    // presence is the trap: NWS computes heatIndex unconditionally, and in
-    // dry air it comes out below the air temperature (a Phoenix station at
-    // 35.0 C reported 34.0 C), so a presence test would render 'Feels 93°'
-    // beside a Temperature slot reading 95°.
+    // correction's own direction, else the plain temperature. A presence test
+    // is the trap: NWS computes heatIndex unconditionally, and in dry air it
+    // comes out below the air temperature.
     var feels = null;
     if (isNum(obs.temp)) {
       feels = obs.temp;
@@ -1375,23 +1244,21 @@ function assembleWx(lat, lon) {
     }
     if (feels !== null) {
       var ft = fmtTempFromC(feels);
-      pl['WX_FEELS'] = capBytes(pickWx(['Feels ' + ft, 'Fls ' + ft, ft],
-                                        budgetFor(slotsShowing('feels'))));
+      pl['WX_FEELS'] = pickWx(['Feels ' + ft, 'Fls ' + ft, ft],
+                              budgetFor('feels'));
     }
     if (isNum(obs.dp)) {
       var dt = fmtTempFromC(obs.dp);
-      pl['WX_DEW'] = capBytes(pickWx(['Dew ' + dt, 'D ' + dt, dt],
-                                      budgetFor(slotsShowing('dew'))));
+      pl['WX_DEW'] = pickWx(['Dew ' + dt, 'D ' + dt, dt], budgetFor('dew'));
     }
     if (isNum(obs.rh)) {
       var rh = String(Math.round(obs.rh)) + '%';
-      pl['WX_HUM'] = capBytes(pickWx(['Hum ' + rh, rh],
-                                      budgetFor(slotsShowing('hum'))));
+      pl['WX_HUM'] = pickWx(['Hum ' + rh, rh], budgetFor('hum'));
     }
     if (isNum(obs.ws)) {
-      // km/h from the API either way. NWS windGust comes from the METAR G
-      // group, coded only when the peak runs 10 kt (~18.5 km/h) above the
-      // mean, so the 8 km/h margin below only matters for a non-METAR source.
+      // km/h from the API either way. NWS codes windGust only when the peak
+      // runs 10 kt (~18.5 km/h) above the mean, so the 8 km/h margin below
+      // only matters for a non-METAR source.
       var metric = wxMetric();
       var spd = Math.round(metric ? obs.ws : obs.ws / 1.609344);
       var unit = metric ? ' km/h' : ' mph';
@@ -1400,70 +1267,61 @@ function assembleWx(lat, lon) {
       if (isNum(obs.wg) && obs.wg >= obs.ws + 8) {
         gust = ' G' + Math.round(metric ? obs.wg : obs.wg / 1.609344);
       }
-      // Calm is its own word, not '0 mph' -- but only when nothing gusted.
-      pl['WX_WIND'] = capBytes((spd === 0 && !gust) ? 'Calm'
+      // Calm is its own word, not '0 mph', but only when nothing gusted.
+      pl['WX_WIND'] = (spd === 0 && !gust) ? 'Calm'
         : pickWx([dir + spd + unit + gust, dir + spd + unit, dir + spd],
-                 budgetFor(slotsShowing('wind'))));
+                 budgetFor('wind'));
     }
     if (isNum(obs.pr)) {
       // Pascals from the API. inHg keeps two decimals (the useful digits are
       // the last two); millibars are whole numbers.
       var pres = wxMetric() ? String(Math.round(obs.pr / 100)) + ' mb'
                             : (obs.pr / 3386.389).toFixed(2) + ' in';
-      pl['WX_PRES'] = capBytes(pickWx([pres, pres.split(' ')[0]],
-                                       budgetFor(slotsShowing('pres'))));
+      pl['WX_PRES'] = pickWx([pres, pres.split(' ')[0]], budgetFor('pres'));
     }
     if (!tOldest || obs.t < tOldest) tOldest = obs.t;
   }
 
-  // slotsFrom('fcst') is {16,17,20,28}, covering ALL THREE strings this block
-  // emits (WX_FCST, WX_HILO and WX_FCST2), so one gate is enough for the set.
-  var fc = wxUses(slotsFrom('fcst')) ? readWx('wx_fcst') : null;
+  // One gate serves all three strings this block emits: slotsFrom('fcst')
+  // covers WX_FCST, WX_HILO and WX_FCST2.
+  var fc = wxWants('fcst') ? readWx('wx_fcst') : null;
   if (fc && fc.p && fc.p.length) {
-    pl['WX_FCST'] = capBytes(fitWx(fc.p[0].s, budgetFor(slotsShowing('fcst')), true));
-    // The second period, prefixed with its own NWS name when that fits:
-    // 'Tonight: Mstly Cldy' says which half of the day it covers, where
-    // 'Mstly Cldy' alone does not. Prose, so the inner fitWx truncation is
-    // the right fallback and doubles as pickWx's last rung.
+    pl['WX_FCST'] = fitWx(fc.p[0].s, budgetFor('fcst'), true);
     if (fc.p.length >= 2) {
-      var b2 = budgetFor(slotsShowing('fcst2'));
+      // The second period, prefixed with its own NWS name when that fits:
+      // 'Tonight: Mstly Cldy' says which half of the day it covers. Prose, so
+      // the inner fitWx truncation is the right fallback and doubles as
+      // pickWx's last rung.
+      var b2 = budgetFor('fcst2');
       var s2 = fitWx(fc.p[1].s, b2, true);
       var nm = fc.p[1].n;
-      pl['WX_FCST2'] = capBytes(nm ? pickWx([nm + ': ' + s2, s2], b2) : s2);
-    }
-    // NWS can return a period with a null temperature; the observation path
-    // guards this explicitly and slot 17 needs the same — suppress the
-    // string (the watch renders '--') rather than send 'H NaN° L 73°'.
-    if (fc.p.length >= 2 &&
-        typeof fc.p[0].t === 'number' && typeof fc.p[1].t === 'number') {
-      // Chronological order in both cases; the H/L labels carry the
-      // disambiguation across the day/night boundary, so every value shown
-      // keeps its label.
-      //
-      // Single letters; both alternatives were measured and rejected. The
-      // Gothic fonts lack U+2191/2193 and U+25B2/25BC (missing-glyph boxes,
-      // while '°' renders), and a custom font would cost six faces of app
-      // heap for the size ladder. 'Hi'/'Lo' at 13 characters overruns
-      // CHAR_BUDGET_144's Medium budget of 12 and falls to a shorter rung,
-      // where this 11-character form fits. No gallery scenario covers that
-      // case, so check any label change against the budget tables.
-      var t0 = fmtTempFromF(fc.p[0].t);
-      var t1 = fmtTempFromF(fc.p[1].t);
-      var a0 = fc.p[0].d ? 'H' : 'L';
-      var a1 = fc.p[0].d ? 'L' : 'H';
-      var n0 = t0.replace('°', '');
-      var n1 = t1.replace('°', '');
-      // WX_HILO shows in slots 17 and 20, so it is width-fitted like every
-      // other string — without a budget the auto-font XS rule could never
-      // apply to it either. A ladder, not fitWx: a tail cut splits the second
-      // number into a plausible wrong one ('H 82° L 6' at 9).
-      pl['WX_HILO'] = capBytes(pickWx([
-        a0 + ' ' + t0 + ' ' + a1 + ' ' + t1,   // H 82° L 64°
-        a0 + t0 + ' ' + a1 + t1,               // H82° L64°
-        a0 + n0 + ' ' + a1 + n1,               // H82 L64
-        a0 + ' ' + t0,                         // H 82°
-        a0 + n0                                // H82
-      ], budgetFor(slotsShowing('hilo'))));
+      pl['WX_FCST2'] = nm ? pickWx([nm + ': ' + s2, s2], b2) : s2;
+      // A period can carry a null temperature: leave the string empty, which
+      // the watch renders as '--', rather than send 'H NaN° L 73°'.
+      if (typeof fc.p[0].t === 'number' && typeof fc.p[1].t === 'number') {
+        // Chronological, with the H/L labels carrying the day/night order, so
+        // every value shown keeps its label. Single letters, because the
+        // system fonts have no arrow glyphs, a custom font would cost six
+        // faces of heap, and 'Hi'/'Lo' at 13 characters overruns the 144 px
+        // Medium budget of 12 where this form fits. No gallery scenario covers
+        // that, so check any label change against the budget tables.
+        var t0 = fmtTempFromF(fc.p[0].t);
+        var t1 = fmtTempFromF(fc.p[1].t);
+        var a0 = fc.p[0].d ? 'H' : 'L';
+        var a1 = fc.p[0].d ? 'L' : 'H';
+        var n0 = t0.replace('°', '');
+        var n1 = t1.replace('°', '');
+        // Width-fitted like every other string, or the auto-font rule could
+        // never apply to it. A ladder, not fitWx: a tail cut turns the second
+        // number into a plausible wrong one ('H 82° L 6' at 9).
+        pl['WX_HILO'] = pickWx([
+          a0 + ' ' + t0 + ' ' + a1 + ' ' + t1,   // H 82° L 64°
+          a0 + t0 + ' ' + a1 + t1,               // H82° L64°
+          a0 + n0 + ' ' + a1 + n1,               // H82 L64
+          a0 + ' ' + t0,                         // H 82°
+          a0 + n0                                // H82
+        ], budgetFor('hilo'));
+      }
     }
     if (!tOldest || fc.t < tOldest) tOldest = fc.t;
   }
@@ -1471,18 +1329,18 @@ function assembleWx(lat, lon) {
   // The slot half of fetchWeather's wantAlert, never wantPins: pins alone must
   // not put alert strings in the payload. slotsFrom('alerts') includes the
   // fallback slots, so they keep all of their inputs.
-  var al = wxUses(slotsFrom('alerts')) ? readWx('wx_alerts') : null;
+  var al = wxWants('alerts') ? readWx('wx_alerts') : null;
   if (al && al.f) {
     var r = buildAlertStrings(al.f, nowSec);
-    pl['WX_ALERT']  = capBytes(r.a);
+    pl['WX_ALERT']  = r.a;
     pl['WX_EXP']    = r.aExp;
-    pl['WX_ALERT2'] = capBytes(r.a2);
+    pl['WX_ALERT2'] = r.a2;
     pl['WX_EXP2']   = r.a2Exp;
   }
   // Sun times do not fold into tOldest: WX_TIME drives fmt_wx's 3-hour
   // staleness blanking, which is about data going out of date, and the watch
   // tests these instants against its own clock instead.
-  if (wxUses(slotsFrom('sun')) && isNum(lat) && isNum(lon)) {
+  if (wxWants('sun') && isNum(lat) && isNum(lon)) {
     var day = nextDaylight(lat, lon, nowSec);
     pl['WX_SUNRISE'] = day[0];
     pl['WX_SUNSET']  = day[1];
@@ -1491,6 +1349,10 @@ function assembleWx(lat, lon) {
     pl['WX_GOLD2'] = gold[1];
   }
   if (tOldest) pl['WX_TIME'] = Math.floor(tOldest / 1000);
+  // Capped in one place, so no string can reach the watch uncapped.
+  for (var k in pl) {
+    if (typeof pl[k] === 'string') pl[k] = capBytes(pl[k]);
+  }
   return pl;
 }
 
@@ -1504,66 +1366,52 @@ function sendWx(pl) {
 // needed by a configured slot and past their minimum interval, then
 // assembles one payload from whatever is cached and queues it.
 function fetchWeather(lat, lon) {
-  // The alert list has two consumers, the watch's alert slots and timeline
-  // pins, but wantWx alone decides whether anything is sent (see done()).
-  // That separation keeps pins-on from changing a byte of what the watch
-  // receives when no weather slot is configured.
+  // The alert list feeds both the alert slots and timeline pins, but wantWx
+  // alone decides whether anything is sent (see done()), so pins on never
+  // change a byte of what the watch receives with no weather slot configured.
   var wantWx = wxNeeded();
   var wantPins = timelineAlerts();
   if (!wantWx && !wantPins) return;
   var lkey = lat.toFixed(2) + ',' + lon.toFixed(2);
 
-  // The per-resource caches are for a PLACE as well as a time (wx_grid keys
-  // itself; these three do not): after a flight, yesterday's city's forecast
-  // is only 20 minutes old, so the time gate alone would show its H/L here
-  // for up to another hour. A new rounded location drops all three — alerts
-  // included, since rendering an alert from 2,500 km away if this beat's
-  // fetch fails is worse than rendering none.
-  //
-  // This runs BEFORE the no-coverage check, and must. markNoCoverage() drops
-  // the caches when it latches, but a later visit to a covered place refills
-  // them while the latch survives — so an uncovered location reached from a
-  // covered one would otherwise assemble the PREVIOUS place's weather and
-  // re-send it every heartbeat. The latch is keyed on 2-decimal lat/lon
-  // (~1.1 km), so that is a short hop across a coverage edge, not a flight.
+  // The three per-resource caches are for a place as well as a time, so a new
+  // rounded location drops them: the time gate alone would show a previous
+  // city's recent forecast here, and when this beat's alert fetch fails a
+  // far-away alert is worse than none. This must run before the no-coverage
+  // check: a later covered visit refills the caches while the latch survives,
+  // so an uncovered location reached from it, a short hop across a coverage
+  // edge, would re-send that place's weather every beat.
   if (localStorage.getItem('wx_lkey') !== lkey) {
     dropWxCaches();
     try { localStorage.setItem('wx_lkey', lkey); } catch (e) {}
   }
 
   if (localStorage.getItem('wx_nocov') === lkey) {
-    // Sun times are astronomy, as correct outside NWS coverage as inside it,
-    // so a configured sun slot still gets its payload. Every weather string
-    // assembles empty: the caches belong to this place, and nothing refills
-    // them here.
-    if (wxUses(slotsFrom('sun'))) sendWx(assembleWx(lat, lon));
+    // Sun times are as correct outside NWS coverage as inside it, so a
+    // configured sun slot still gets its payload, every weather string empty.
+    if (wxWants('sun')) sendWx(assembleWx(lat, lon));
     return;
   }
 
   // The fallback slots need two resources each: 20 = alerts + forecast,
   // 21 and 31 = alerts + observation.
-  var wantObs   = wxUses(slotsFrom('obs'));
-  var wantFcst  = wxUses(slotsFrom('fcst'));
-  // ORed, not duplicated: one /alerts/active request serves both consumers,
-  // so a configured alert slot plus pins-on does not double-request.
-  var wantAlert = wxUses(slotsFrom('alerts')) || wantPins;
+  var wantObs   = wxWants('obs');
+  var wantFcst  = wxWants('fcst');
+  // One /alerts/active request serves both consumers.
+  var wantAlert = wxWants('alerts') || wantPins;
 
   var now = Date.now();
   var obs = readWx('wx_obs');
   var fcst = readWx('wx_fcst');
-  // One minute of slack on the interval gates: the caches stamp t when the
-  // RESPONSE lands, a fetch latency after the minute-aligned heartbeat that
-  // started it, so a strict >= test comes up a hair short on every following
-  // eligible beat and each resource refetches at DOUBLE its interval plus a
-  // beat (observation every 20 min, forecast every 70). The slack absorbs
-  // the latency without letting an off-cycle call (webviewclosed) refetch
-  // early against the server's own max-age.
-  // `obs.dp === undefined` refetches, once and regardless of age, the
-  // {t, temp, desc} blob the published 1.0.0 build wrote. Otherwise an
-  // upgrading user who configures Dew Point, Humidity, Wind or Pressure sees
-  // them sit on '--' for up to nine minutes behind a closed interval gate
-  // while Conditions and Temperature render. obsRecord() always writes dp
-  // (null when the station drops it), so this fires at most once per install.
+  // One minute of slack on the interval gates: a cache is stamped when its
+  // response lands, a fetch latency after the minute-aligned heartbeat, so a
+  // strict test would refetch each resource at twice its interval plus a
+  // beat. The slack still keeps an off-cycle call (webviewclosed) from
+  // refetching early against the server's own max-age.
+  // `obs.dp === undefined` refetches the {t, temp, desc} blob that 1.0.0
+  // wrote once, regardless of age, or a newly configured Dew Point, Humidity,
+  // Wind or Pressure would sit on '--' behind the gate. obsRecord() always
+  // writes dp, so this fires at most once per install.
   var needObs  = wantObs  && (!obs  || obs.dp === undefined ||
                               now - obs.t  >=  9 * 60 * 1000);
   var needFcst = wantFcst && (!fcst || now - fcst.t >= 59 * 60 * 1000);
@@ -1571,12 +1419,10 @@ function fetchWeather(lat, lon) {
 
   var pending = 1;   // sentinel: done() cannot fire before all branches start
   function done() {
-    // wantWx, not `pending === 0` alone: with only pins enabled this fires
-    // with every cache read in assembleWx() gated off, and the all-empty
-    // payload would clobber wx_payload and enqueue a new AppMessage. main.c
-    // accepts it on WX_TIME's mere presence and blanks every weather buffer,
-    // invisibly in a screenshot. assembleWx's own alert gate is the second
-    // barrier.
+    // wantWx, not `pending === 0` alone: with only pins on, every cache read
+    // in assembleWx() is gated off, and the all-empty payload would clobber
+    // wx_payload and make main.c blank every weather buffer, invisibly in a
+    // screenshot.
     if (--pending === 0 && wantWx) sendWx(assembleWx(lat, lon));
   }
 
@@ -1612,7 +1458,7 @@ function locationSuccess(rawLat, rawLon, needImage) {
 
   // Without the explicit default (see numSetting), a fresh install would
   // render at City instead of the State default.
-  var zoom = numSetting('Zoom', 1, 0, 2);
+  var zoom = numSetting('Zoom', 0, 2);
 
   // EPSG:3857 units are metres only at the equator; a projected span W covers
   // W*cos(lat) of ground, so divide it out to make the config labels true.
@@ -1627,12 +1473,10 @@ function locationSuccess(rawLat, rawLon, needImage) {
   var bbox = [cx - W / 2, cy - H / 2, cx + W / 2, cy + H / 2].join(',');
 
   // The bbox is a pure function of this key, so a key that no longer matches
-  // the cached one means the map has moved (or zoomed, or was never fetched):
-  // the cached basemap is for somewhere else and must be refetched, not
-  // blended with radar for a different place.
-  // 'v3': cache holds 16-color transcoded bytes, and the key carries the image
-  // size -- the same phone paired to a second watch must not reuse a basemap
-  // rendered for the first one's display.
+  // the cached one means the map has moved, zoomed or was never fetched, and
+  // the cached basemap must be refetched rather than blended with radar for a
+  // different place. The key carries the image size so a phone paired to a
+  // second watch cannot reuse a basemap rendered for the first one's display.
   var key = 'v3_' + IMG_W + 'x' + IMG_H + '_' +
             zoom + '_' + lat.toFixed(2) + '_' + lon.toFixed(2);
 
@@ -1642,17 +1486,12 @@ function locationSuccess(rawLat, rawLon, needImage) {
   var g = gen;
 
   // needImage is set on 'ready' (a relaunch) and when the watch sends 2 (no
-  // frame, a failed decode, a dropped transfer). Everything below is seconds
-  // away at best and unbounded when the phone has no signal, so answer from
-  // the replay cache first.
+  // frame, a failed decode, a dropped transfer). tx_hash outlives the
+  // watchface, so it must go before this pass composes; the replay's own ACK
+  // re-earns it. Everything below is seconds away at best and unbounded with
+  // no signal, so answer from the replay cache first.
   if (needImage) {
-    // Anything delivered BEFORE the watch told us it was frameless no longer
-    // describes it, so deliveredHash starts empty and is re-earned by the
-    // replay's own ACK. Without this the skip in composeAndSend could suppress
-    // the one transfer that would have filled an empty face -- in the narrow
-    // case where the replay could not run (no blob, or a bbox that moved) and
-    // pkjs happened to outlive the watchface.
-    deliveredHash = null;
+    clearTxHash();
     replayComposite(key);
   }
 
@@ -1664,10 +1503,10 @@ function locationSuccess(rawLat, rawLon, needImage) {
     'Lon': Math.round(lon * 100)
   } });
 
-  // Both layers are inputs to one blend, so they have to JOIN before anything
-  // can be sent. `want` is 1 when radar is Disabled — there is no second
+  // Both layers are inputs to one blend, so they have to join before anything
+  // can be sent. `want` is 1 when radar is Disabled: there is no second
   // fetch, and buildComposite reads a null radar buffer as "every pixel has
-  // alpha 0", i.e. a pass-through basemap.
+  // alpha 0", a pass-through basemap.
   var mode = radarMode();
   var want = (mode === 0) ? 1 : 2;
   var got = 0, bmRgba = null, rdRgba = null, failed = false;
@@ -1685,7 +1524,7 @@ function locationSuccess(rawLat, rawLon, needImage) {
       bmRgba = null; rdRgba = null;            // release both buffers
       return;
     }
-    composeAndSend(bmRgba, rdRgba, mode, needImage);
+    composeAndSend(bmRgba, rdRgba, mode, key);
     bmRgba = null; rdRgba = null;
   }
 
@@ -1720,8 +1559,8 @@ function locationSuccess(rawLat, rawLon, needImage) {
     });
   }
 
-  // Radar is always re-fetched — it is small and time-sensitive — unless
-  // the user disabled the layer entirely.
+  // Radar is always re-fetched, being small and time-sensitive, unless the
+  // user disabled the layer entirely.
   if (mode !== 0) {
     fetchPng(exportUrl(RADAR_URL, bbox, true), function (bytes) {
       if (g !== gen) return;   // superseded by a newer location
@@ -1729,10 +1568,8 @@ function locationSuccess(rawLat, rawLon, needImage) {
     });
   }
 
-  // Weather rides the same heartbeat that got us here (RefreshInterval,
-  // default 10 min) — no timer of its own, and it keeps working when the radar
-  // layer is Disabled (that only suppresses the radar fetch above, not the
-  // request).
+  // Weather rides the same heartbeat that got us here, with no timer of its
+  // own, and keeps working when the radar layer is Disabled.
   lastLat = lat;
   lastLon = lon;
   fetchWeather(lat, lon);
@@ -1740,7 +1577,7 @@ function locationSuccess(rawLat, rawLon, needImage) {
 
 // Blend, hash, and either transfer or skip. Called once per pass, only when
 // every input arrived.
-function composeAndSend(bmRgba, rdRgba, mode, needImage) {
+function composeAndSend(bmRgba, rdRgba, mode, key) {
   var r;
   try {
     r = composite.buildComposite(bmRgba, rdRgba, mode, IMG_W, IMG_H,
@@ -1753,39 +1590,29 @@ function composeAndSend(bmRgba, rdRgba, mode, needImage) {
   console.log('Composite ' + r.bytes.length + ' B, ' + r.colors +
               ' colors -> ' + r.folded + ', hash ' + h);
   var committed = localStorage.getItem('tx_hash');
-  // pendingHash and deliveredHash both skip even when needImage is set.
-  // needImage bypasses the COMMITTED cache -- the watch says it has no frame,
-  // so what we believe it once displayed proves nothing -- but these two say
-  // something tx_hash cannot: that THIS pass has already queued (pending) or
-  // landed (delivered) these exact bytes on that same frameless watch, which
-  // makes sending them again pure duplication. Both arms are needed because
-  // which one is true is a race: a replay that ACKs before the fetch returns
-  // has already cleared pendingHash by the time we get here.
-  //
-  // It is safe to be this strict only because replayComposite() answers a
-  // frameless watch with real bytes rather than a skip -- the pair is what
-  // guarantees a frame still arrives. Do not tighten one without the other.
-  if (h === pendingHash || h === deliveredHash || (!needImage && h === committed)) {
-    // The pending arm logs distinctly: it means something different about
-    // what the watch is showing, and the log line is the cache's only
-    // instrument.
+  // pendingHash: these bytes are queued or in flight. tx_hash: an ACK showed
+  // the watch displays them, and a frameless report clears it before the
+  // pass composes, so there only an ACK since, such as the replay's, counts.
+  // Both arms are needed: a replay that ACKs before the fetch returns has
+  // already cleared pendingHash.
+  if (h === pendingHash || h === committed) {
+    // The pending arm logs distinctly, because the log line is the cache's
+    // only instrument.
     console.log('Composite unchanged, skipping transfer' +
                 (h === pendingHash ? ' (already in flight)' : ''));
-    // Stamp the radar time only when nothing identical is pending, i.e. on a
-    // committed or delivered match: both rest on an ACK, so the watch is known
-    // to display these bytes. A pendingHash match is merely queued or in
-    // flight; the watch still shows the previous frame (or none), and dating
-    // it now would misdate a frame that may never be drawn. The pending item's
-    // own onAck carries the correct stamp and fires only if it lands. After a
-    // replay the age therefore reads from the replayed frame's fetch until the
-    // next heartbeat re-stamps it, stale-side by design.
+    // Stamp the radar time only on a committed match, which rests on an ACK.
+    // A pending match may never be drawn, so dating it now could misdate the
+    // screen; the pending item's own onAck carries the stamp. After a replay
+    // the age therefore reads from the replayed frame's fetch until the next
+    // heartbeat re-stamps it, stale-side by design.
     if (h !== pendingHash) {
       enqueue({ kind: 'msg', dict: { 'RADAR_TIME': radarStamp(mode) } });
     }
     return;
   }
   pendingHash = h;
-  enqueue({ kind: 'img', bytes: r.bytes, hash: h, radarTime: radarStamp(mode) });
+  enqueue({ kind: 'img', bytes: r.bytes, hash: h, radarTime: radarStamp(mode),
+            key: key });
 }
 
 // When pkjs fetched the radar layer this composite was built from, in unix
@@ -1797,11 +1624,11 @@ function radarStamp(mode) {
 }
 
 function getLocation(needImage) {
-  // A manual location bypasses geolocation entirely — no permission prompt,
+  // A manual location bypasses geolocation entirely: no permission prompt,
   // and it keeps working when the phone's location services are off. It flows
   // through the same locationSuccess as a GPS fix, so the map, the weather,
   // and the watch's Lat/Long slot all follow it with no further plumbing.
-  var m = manualLocation();
+  var m = parseManualLoc(localStorage.getItem('ManualLoc'));   // '' or absent = GPS
   if (m) {
     locationSuccess(m.lat, m.lon, needImage);
     return;
@@ -1825,7 +1652,7 @@ function getLocation(needImage) {
 // Until the first Save the watch owns the four line sizes (load_settings() in
 // main.c). REQUEST_FONTS asks for them, the watch answers with the four font
 // keys, and the answer goes into Clay's store, which the settings page reads.
-var FONT_KEYS = ['TopFont1', 'TopFont', 'BottomFont', 'BottomFont2'];
+var FONT_KEYS = LINE_KEYS.map(function (k) { return k[1]; });
 // How long a settings page waits for that answer. The Pebble app gives
 // openURL 10 s from showConfiguration.
 var SIZE_WAIT_MS = 3000;
@@ -1898,63 +1725,46 @@ Pebble.addEventListener('showConfiguration', function () {
 
 Pebble.addEventListener('webviewclosed', function (e) {
   if (!e || !e.response) return;
-  // convert=false: the default conversion re-keys everything by NUMERIC
-  // message-key id, so d.TopSlot & co. would all be undefined -> NaN.
+  // convert=false: the default conversion re-keys everything by numeric
+  // messageKey id, so d.TopSlot and the rest would read as undefined.
   var d = clay.getSettings(e.response, false);
-  // TopSlot/TopFont drive Top Line 2 and BottomSlot/BottomFont drive Bottom
-  // Line 1. The names are historical; renaming a Clay messageKey resets every
-  // saved config.
-  var s = {
-    'TopSlot1': Number(d.TopSlot1.value),
-    'TopFont1': Number(d.TopFont1.value),
-    'TopSlot': Number(d.TopSlot.value),
-    'TopFont': Number(d.TopFont.value),
-    'BottomSlot': Number(d.BottomSlot.value),
-    'BottomFont': Number(d.BottomFont.value),
-    'BottomSlot2': Number(d.BottomSlot2.value),
-    'BottomFont2': Number(d.BottomFont2.value),
-    // Watch-bound, unlike Zoom: the watch's tick_handler owns the heartbeat
-    // cadence, so the minutes value has to reach it (and replay from cfg2 on
-    // 'ready' like every other watch key).
-    'RefreshInterval': Number(d.RefreshInterval.value),
-    // Guarded like UseGps rather than dereferenced like the older keys: a
-    // response from a config page that predates this toggle has no such
-    // field, and absent must read as on (the default), not 0.
-    'BtIndicator': (d.BtIndicator && !Number(d.BtIndicator.value)) ? 0 : 1,
-    // Clay color pickers store the chosen color as an 0xRRGGBB number; the
-    // watch quantizes to GColor8 with GColorFromHEX.
-    'TextColor': Number(d.TextColor.value),
-    'OutlineColor': Number(d.OutlineColor.value)
-  };
+  var s = {};
+  LINE_KEYS.forEach(function (k) {
+    s[k[0]] = Number(d[k[0]].value);
+    s[k[1]] = Number(d[k[1]].value);
+  });
+  s['RefreshInterval'] = Number(d.RefreshInterval.value);
+  // Guarded: absent reads as on, the default, not 0.
+  s['BtIndicator'] = (d.BtIndicator && !Number(d.BtIndicator.value)) ? 0 : 1;
+  // Clay color pickers store an 0xRRGGBB number; the watch quantizes it with
+  // GColorFromHEX.
+  s['TextColor'] = Number(d.TextColor.value);
+  s['OutlineColor'] = Number(d.OutlineColor.value);
+
   // Zoom, RadarMode, UseGps/ManualLoc, WxUnits and TimelineAlerts are
-  // phone-side only: never forwarded to the watch, persisted here under their
-  // own keys.
-  var zoom = Number(d.Zoom.value);
-  var zoomChanged = String(zoom) !== localStorage.getItem('Zoom');
-  localStorage.setItem('Zoom', String(zoom));
+  // phone-side: none is a package.json messageKey, so they stay out of s and
+  // cfg2 and live under their own localStorage keys.
+  var zoomChanged = storeSetting('Zoom', String(Number(d.Zoom.value)),
+                                 SETTING_DEFAULTS.Zoom);
   // The config page refuses to save with the GPS toggle off and an
   // unparsable box (custom-clay.js disables Save), so a pair that fails to
   // parse here is a stale or hand-built response: fall back to GPS rather
-  // than guess. Persisted under the single key manualLocation() reads:
-  // '' = GPS.
+  // than guess. Stored under the single key 'ManualLoc', which getLocation()
+  // reads: '' = GPS.
   var mloc = (d.UseGps && !Number(d.UseGps.value))
                ? parseManualLoc(d.ManualLoc && d.ManualLoc.value)
                : null;
-  var manual = mloc ? mloc.lat + ',' + mloc.lon : '';
-  var locChanged = manual !== (localStorage.getItem('ManualLoc') || '');
-  localStorage.setItem('ManualLoc', manual);
-  var radar = Number(d.RadarMode.value);
-  var radarChanged = String(radar) !== localStorage.getItem('RadarMode');
-  localStorage.setItem('RadarMode', String(radar));
+  var locChanged = storeSetting('ManualLoc',
+                                mloc ? mloc.lat + ',' + mloc.lon : '', '');
+  var radarChanged = storeSetting('RadarMode', String(Number(d.RadarMode.value)),
+                                  SETTING_DEFAULTS.RadarMode);
   // A units change drops the cached payload and backdates the per-resource
-  // stamps so the interval gates open. The entries are kept, since they hold
-  // unit-agnostic numbers, so a failed refetch still shows data. t = 1, not
-  // 0: assembleWx folds the oldest stamp with `!tOldest || ...`, and a falsy
-  // 0 would be skipped, stamping stale data with `now` so the watch's 3-hour
-  // '--' guard could never fire.
-  var wxUnits = String(Number(d.WxUnits.value));
-  var unitsChanged = wxUnits !== (localStorage.getItem('WxUnits') || '0');
-  localStorage.setItem('WxUnits', wxUnits);
+  // stamps so the interval gates open, keeping the unit-agnostic entries for
+  // a failed refetch to show. t = 1, not 0: assembleWx folds the oldest stamp
+  // with `!tOldest || ...`, and a falsy 0 would stamp stale data with `now`,
+  // so the watch's 3-hour '--' guard could never fire.
+  var unitsChanged = storeSetting('WxUnits', String(Number(d.WxUnits.value)),
+                                  SETTING_DEFAULTS.WxUnits);
   if (unitsChanged) {
     localStorage.removeItem('wx_payload');
     var oldObs = readWx('wx_obs');
@@ -1968,57 +1778,40 @@ Pebble.addEventListener('webviewclosed', function (e) {
   // '1'/'0', never String(boolean): 'false' reads back through numSetting as
   // NaN, which folds to the on default and makes Off unreachable.
   var pins = (d.TimelineAlerts && !Number(d.TimelineAlerts.value)) ? '0' : '1';
-  // Compared against the SAME default numSetting uses, so a fresh install
-  // saving the toggle in its default position does not read as a change.
-  var pinsChanged = pins !== (localStorage.getItem('TimelineAlerts') || '1');
-  localStorage.setItem('TimelineAlerts', pins);
+  var pinsChanged = storeSetting('TimelineAlerts', pins,
+                                 SETTING_DEFAULTS.TimelineAlerts);
   if (pinsChanged && pins === '0') {
     // Turning it off forgets what was pushed, so turning it back on re-pushes
-    // the alerts still in force — the user may have swiped those pins away.
-    // Idempotent per id — inserting an existing id updates that pin rather than
-    // creating a second one, so the cost is a handful of inserts.
+    // the alerts still in force, which the user may have swiped away.
+    // Inserting an existing id updates that pin, so the cost is a handful of
+    // inserts.
     localStorage.removeItem('tl_pins');
     tlState = null;
   }
-  // The link is usually busy right after the webview closes; a silently NACKed
-  // settings message would leave the watch's persisted copy diverged forever,
-  // so keep a copy to replay on the next 'ready' and send through the queue,
-  // never a bare sendAppMessage, which would race the imagery the branches
-  // below kick off.
-  // 'cfg2', not 'cfg': this blob is replayed verbatim on 'ready', and an old
-  // 'cfg' blob still carries RadarMode, which is not a declared messageKey, so
-  // replaying it would send an unknown key. Renaming the storage key retires
-  // every stale blob.
+  // Kept for the next 'ready' to replay, because the link is often busy now
+  // and a NACKed settings message would leave the watch diverged for good.
+  // Queued, never a bare sendAppMessage, which would race the imagery below.
+  // Never rename the key: every install's saved config lives under it.
   localStorage.setItem('cfg2', JSON.stringify(s));
   enqueue({ kind: 'msg', dict: s });
-  if (zoomChanged || locChanged) {
-    getLocation(true);   // new bbox: the composite must be re-rendered
-  } else if (radarChanged) {
-    // The blend happens here, so any mode change, including to Disabled,
-    // needs a fresh composite.
-    clearTxHash();
+  if (zoomChanged || locChanged || radarChanged) {
+    // The blend happens here, so a radar mode change, Disabled included,
+    // needs a fresh composite even where the bbox did not move.
+    if (radarChanged) clearTxHash();
     getLocation(false);
   } else if (wxNeeded() || pinsChanged) {
-    // No imagery to redo, but the weather config may have changed (units, or
-    // a weather slot newly assigned): refresh from the last fix. The paths
-    // above reach fetchWeather through locationSuccess anyway.
-    // `|| pinsChanged` so turning pins on takes effect now rather than at the
-    // next heartbeat — up to a full hour at RefreshInterval 60, which reads as
-    // a broken toggle. fetchWeather self-gates, so turning pins OFF through
-    // this arm is a no-op fetch that sends nothing.
+    // No imagery to redo, but units or a weather slot may have changed, so
+    // refresh from the last fix. `|| pinsChanged` makes turning pins on take
+    // effect now rather than up to an hour later; turning them off this way
+    // fetches and sends nothing, because fetchWeather self-gates.
     if (lastLat !== null) {
       fetchWeather(lastLat, lastLon);
     } else if (wxNeeded()) {
-      // Settings saved before the first fix resolved (cold GPS): there is no
-      // last fix, and a units change just deleted wx_payload, so doing nothing
-      // would leave the old units on screen until the next heartbeat. Resolve
-      // a fix; weather rides along in locationSuccess.
-      //
-      // wxNeeded(), not pinsChanged: 'ready' already issued getLocation, which
-      // has no in-flight guard, so a second call runs the whole imagery pass
-      // twice when the fix lands. A pins-only change has nothing on the watch
-      // to redo and must not change what the watch receives, so it waits for
-      // the heartbeat.
+      // Saved before the first fix: a units change just deleted wx_payload,
+      // so resolve a fix and let weather ride along. wxNeeded(), not
+      // pinsChanged: 'ready' already called getLocation, which has no
+      // in-flight guard, so a second call runs the imagery pass twice, and a
+      // pins-only change must not change what the watch receives.
       getLocation(false);
     }
   }
@@ -2042,7 +1835,8 @@ Pebble.addEventListener('ready', function () {
   // Resync a lost save through the queue, not a bare sendAppMessage: the
   // weather replay below enqueues in the same tick, and with two sends in
   // flight the bare one's NACK would go unnoticed, leaving the watch's
-  // persisted settings diverged forever.
+  // persisted settings diverged forever. Each try also covers enqueue, so a
+  // send that throws cannot skip the getLocation below.
   var cfg = localStorage.getItem('cfg2');
   if (cfg) {
     try { enqueue({ kind: 'msg', dict: JSON.parse(cfg) }); } catch (e) {}
@@ -2059,14 +1853,14 @@ Pebble.addEventListener('ready', function () {
     try { enqueue({ kind: 'msg', dict: JSON.parse(wxp) }); } catch (e) {}
   }
   // The phone cannot tell whether the relaunched watch restored a persisted
-  // frame (emery/gabbro only), so it bypasses the committed transfer cache.
+  // frame (emery/gabbro only), so it treats the watch as frameless.
   getLocation(true);
 });
 
 Pebble.addEventListener('appmessage', function (e) {
   // The outer test is truthiness, which is why the watch's flag is 2/1 and
   // never 0: a 0 would be silently ignored here and the heartbeat would die.
-  // 2 = "I need a frame" -> bypass the committed transfer cache.
+  // 2 = "I need a frame" -> forget the committed transfer cache and replay.
   if (e.payload['REQUEST_IMAGES']) {
     getLocation(e.payload['REQUEST_IMAGES'] === 2);
   }

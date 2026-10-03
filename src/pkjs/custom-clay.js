@@ -1,8 +1,8 @@
 // Runs inside the generated Clay config page, not in pkjs: Clay injects this
 // function by calling .toString() on it, so require() and everything else in
-// this file's scope are unavailable in there — the function body must be
+// this file's scope are unavailable in there: the function body must be
 // self-contained (see "Custom Function" in Clay's README).
-module.exports = function (minified) {
+module.exports = function () {
   var clayConfig = this;
 
   // Must stay in sync with parseManualLoc() in index.js, which cannot be
@@ -59,20 +59,11 @@ module.exports = function (minified) {
     // this function runs and navigates to pebblejs://close unconditionally,
     // so a second submit listener could not stop it.
     function refresh() {
-      if (gps.get()) {
-        loc.hide();
-        err.hide();
-        submit.enable();
-        return;
-      }
-      loc.show();
-      if (parseLoc(loc.get())) {
-        err.hide();
-        submit.enable();
-      } else {
-        err.show();
-        submit.disable();
-      }
+      var gpsOn = gps.get();
+      var ok = gpsOn || parseLoc(loc.get());
+      if (gpsOn) loc.hide(); else loc.show();
+      if (ok) { err.hide(); submit.enable(); }
+      else { err.show(); submit.disable(); }
     }
 
     gps.on('change', refresh);
