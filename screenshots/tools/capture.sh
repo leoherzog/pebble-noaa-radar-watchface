@@ -1,23 +1,15 @@
 #!/usr/bin/env bash
 # Capture one gallery tile: capture.sh <platform> <scenario-id>
 #
-# The whole emulator sequence runs inside this one invocation: emulator state
-# lives in /tmp/pb-emulator.json and is validated by pid, so a command from
-# another shell will not find this emulator and will boot a second one.
-#
-# Every emulator command passes --vnc. Without a display QEMU dies on "Could
-# not initialize SDL", and a flagless command against a running VNC emulator
-# SIGKILLs it and spawns a replacement that dies the same way.
-#
-# The pkill patterns are bracketed so they cannot match themselves, which holds
-# only while this file runs as `bash capture.sh ...`. Never inline these
-# commands into a compound shell command that mentions qemu.
+# Run it only as `bash capture.sh ...`, for the pkill reason in emu.sh.
 set -uo pipefail
 
 PLATFORM="${1:?platform}"
 SID="${2:?scenario id}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ="$(cd "$HERE/../.." && pwd)"
+# shellcheck source=emu.sh
+source "$HERE/emu.sh"
 # GALLERY_DIR overrides where tiles land. The default overwrites the committed
 # tile, so a before/after comparison must redirect one pass or it diffs each
 # tile against itself and always reports zero.
@@ -25,15 +17,10 @@ OUTDIR="${GALLERY_DIR:-$PROJ/screenshots/gallery}/$PLATFORM"
 LOGDIR="${TMPDIR:-/tmp}/pebble-gallery-logs"
 mkdir -p "$OUTDIR" "$LOGDIR"
 
-# Pin the emulator to a specific SDK's firmware. Accepted by install, logs,
-# screenshot and every emu-* command. Only meaningful when the .pbw was built
-# by that same SDK -- see seed.py.
-SDKARG=()
-[ -n "${PEBBLE_EMULATOR_VERSION:-}" ] && SDKARG=(--sdk "$PEBBLE_EMULATOR_VERSION")
-
 # One parse of scenarios.json for the three static fields. Safe to split on
 # whitespace: slugs are hyphenated with no spaces, fmt is 12h/24h, battery is an
-# int. The 'clock' field is deliberately not read here; see the block below.
+# int. The 'clock' field is read where it is applied, so a now+ clock counts
+# from that moment.
 read -r SLUG FMT BATT < <(python3 -c "
 import json
 s=[x for x in json.load(open('$HERE/scenarios.json')) if x['id']==$SID][0]
@@ -42,29 +29,7 @@ print('%02d-%s %s %s' % (s['id'], s['slug'], s['fmt'], s['battery']))")
 OUT="$OUTDIR/$SLUG.png"
 LOG="$LOGDIR/$PLATFORM-$SLUG.log"
 
-cleanup() {
-  pkill -f 'qemu-pebbl[e]'  >/dev/null 2>&1
-  pkill -f 'pypkj[s]'       >/dev/null 2>&1
-  rm -f "${TMPDIR:-/tmp}/pb-emulator.json"
-  sleep 1
-}
-
-cleanup
-python3 "$HERE/seed.py" "$PLATFORM" "$SID" || exit 1
-
-# First install boots the emulator. Wrap only this one in a timeout: boot
-# occasionally half-fails (qemu alive, pypkjs dead, state file never written)
-# and `pebble install` then waits forever. Children inherit the env.
-BOOTLOG="$LOGDIR/$PLATFORM-$SLUG.boot.log"
-echo "[$PLATFORM/$SLUG] booting..."
-timeout 420 pebble install --emulator "$PLATFORM" --vnc "${SDKARG[@]}" >"$BOOTLOG" 2>&1
-if [ $? -ne 0 ]; then
-  echo "[$PLATFORM/$SLUG] boot failed, retrying once (see $BOOTLOG)"
-  cleanup
-  python3 "$HERE/seed.py" "$PLATFORM" "$SID" >/dev/null || exit 1
-  timeout 420 pebble install --emulator "$PLATFORM" --vnc "${SDKARG[@]}" >>"$BOOTLOG" 2>&1 || {
-    echo "[$PLATFORM/$SLUG] BOOT FAILED"; cleanup; exit 1; }
-fi
+boot "[$PLATFORM/$SLUG]" "$PLATFORM" "$SID" "$LOGDIR/$PLATFORM-$SLUG.boot.log"
 
 # These two work against a running --vnc emulator only with the flags spelled
 # out; otherwise they try to launch a second emulator, print "Emulator launch
@@ -75,34 +40,18 @@ pebble emu-time-format --emulator "$PLATFORM" --vnc "${SDKARG[@]}" --format "$FM
 pebble emu-battery --emulator "$PLATFORM" --vnc "${SDKARG[@]}" --percent "$BATT" >/dev/null 2>&1 \
   || { echo "[$PLATFORM/$SLUG] emu-battery FAILED"; cleanup; exit 1; }
 
-
-# Attach logs, then install a second time. The first install's
-# fetch->transfer->decode outruns the log attach, so the marker would be
-# missed; the relaunch replays the lifecycle with logs attached, and the pkjs
-# `ready` handler forces a send past the hash cache. The basemap comes from
-# the localstorage cache the first run wrote.
-: > "$LOG"
-pebble logs --emulator "$PLATFORM" --vnc "${SDKARG[@]}" >>"$LOG" 2>&1 &
-LOGPID=$!
-sleep 3
-pebble install --emulator "$PLATFORM" --vnc "${SDKARG[@]}" >/dev/null 2>&1
-
-DEADLINE=$((SECONDS + 240))
 DECODED=0
-while [ $SECONDS -lt $DEADLINE ]; do
-  if grep -q "Decoded composite" "$LOG" 2>/dev/null; then DECODED=1; break; fi
-  sleep 3
-done
-# On a relaunch the replayed frame decodes before the phone's fresh
-# `Composite <N> B ... hash <h>` line prints, and that hash is what tells two
-# passes' images apart, so stay attached until it lands too.
-if [ "$DECODED" -eq 1 ]; then
+if relaunch_logged "$PLATFORM" "$LOG"; then
+  DECODED=1
+  # On a relaunch the replayed frame decodes before the phone's fresh
+  # `Composite <N> B ... hash <h>` line prints, and that hash is what tells two
+  # passes' images apart, so stay attached until it lands too.
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     grep -q "Composite [0-9]" "$LOG" 2>/dev/null && break
     sleep 2
   done
 fi
-kill $LOGPID >/dev/null 2>&1
+kill "$LOGPID" >/dev/null 2>&1
 
 if [ "$DECODED" -ne 1 ]; then
   echo "[$PLATFORM/$SLUG] NO DECODE within 240s -- see $LOG"
@@ -113,16 +62,8 @@ fi
 
 sleep 4        # let the frame paint and the text slots settle
 
-# Watch clock, applied last. Only the watch moves; the phone keeps real time,
-# so nothing here touches TLS validity or the pkjs 2 h observation gate.
-# It has to come after the final `pebble install`, which resyncs the emulated
-# RTC from the host and silently discards an earlier emu-set-time (exit status
-# stays 0, so the tile just comes out at wall-clock time).
-# Backwards is the safe direction for weather: fmt_wx() blanks a payload to
-# "--" once watch_now - WX_TIME exceeds 3 h, which a past clock never triggers,
-# and alert expiries stay in the future. Sun slots are the exception: a span
-# starting after the watch's tomorrow renders as a date, so a scenario showing
-# one takes a 'today HH:MM:SS' clock, which lands on the capture date.
+# Applied after the final `pebble install`, which resyncs the watch clock from
+# the host and silently discards an earlier emu-set-time (exit status 0).
 CLOCK=$(python3 -c "
 import json, time
 s=[x for x in json.load(open('$HERE/scenarios.json')) if x['id']==$SID][0]
@@ -134,7 +75,7 @@ elif c.startswith('today '):
                                         '%Y-%m-%d %H:%M:%S'))))
 elif c:
     print(int(time.mktime(time.strptime(c, '%Y-%m-%d %H:%M:%S'))))
-")
+") || { echo "[$PLATFORM/$SLUG] clock FAILED to resolve"; cleanup; exit 1; }
 if [ -n "$CLOCK" ]; then
   pebble emu-set-time --emulator "$PLATFORM" --vnc "${SDKARG[@]}" "$CLOCK" >/dev/null 2>&1 \
     || { echo "[$PLATFORM/$SLUG] emu-set-time FAILED"; cleanup; exit 1; }

@@ -3,12 +3,10 @@
 
 One banner per platform, since the Pebble/Rebble portals keep a separate asset
 collection per platform. The hero store screenshot goes on the glass of the
-Pebble developer site's device artwork, over a backdrop: by default the
-topo+radar fetch from banner_bg.py, or with --style bleed/crisp another store
-screenshot scaled up.
+Pebble developer site's device artwork, over the topo+radar backdrop that
+banner_bg.py fetches.
 
     uv run --with pillow --with resvg-py python screenshots/tools/banner.py
-    uv run --with pillow --with resvg-py python screenshots/tools/banner.py --style crisp
 
 Run from noaa-us-weather-radar/.
 """
@@ -17,6 +15,8 @@ import argparse
 import io
 import os
 
+# Not cairosvg: it drops a button from the Time 2 frame and misdraws the Time
+# Round's glass.
 import resvg_py
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
@@ -41,11 +41,7 @@ F_BOLD = os.path.join(FONT_DIR, "RedHatDisplay-Bold.otf")
 F_MED = os.path.join(FONT_DIR, "RedHatText-Medium.otf")
 F_SEMI = os.path.join(FONT_DIR, "RedHatText-Bold.otf")
 
-# Hero = the screenshot inside the watch. Backdrop = the screenshot the bleed
-# and crisp styles blow up behind it, a different scene so the banner does not
-# read as one image at two sizes.
-HERO = "1_minneapolis-derecho"
-BACKDROP = "2_washington-dc-severe"
+HERO = "1_minneapolis-derecho"        # the store screenshot on the glass
 DEFAULT_BG = "washington-dc-severe"   # scenario 11, fetched by banner_bg.py
 
 # Device frames by file stem, each with the display's top-left corner in frame
@@ -87,7 +83,8 @@ INK = (255, 255, 255)
 DIM = (198, 207, 218)
 FAINT = (139, 148, 161)
 
-# NWS-ish reflectivity ramp, used as a thin accent rule under the title.
+# NWS-ish reflectivity ramp, used as a thin accent rule under the title. It is
+# not a legend: the face's live MRMS layer uses a different ramp.
 RAMP = [
     (0x40, 0xE0, 0x40), (0x00, 0xC0, 0x00), (0x00, 0x90, 0x00),
     (0xFF, 0xFF, 0x00), (0xFF, 0xC0, 0x00), (0xFF, 0x80, 0x00),
@@ -127,34 +124,16 @@ def watch(platform):
     return out
 
 
-def backdrop(platform, style, bg_path=None):
-    """720x320 background by style: photo = the banner_bg.py fetch,
-    bleed/crisp = a store screenshot blown up, panel = flat."""
-    if style == "panel":
-        return Image.new("RGBA", (W, H), (18, 20, 24, 255))
-
-    if style == "photo":
-        src = Image.open(bg_path).convert("RGB")
-        k = max(W / src.width, H / src.height)
-        if k != 1.0:
-            src = src.resize((int(src.width * k + 0.5), int(src.height * k + 0.5)), Image.LANCZOS)
-        left, top = (src.width - W) // 2, (src.height - H) // 2
-        bg = src.crop((left, top, left + W, top + H)).convert("RGBA")
-        bg = bg.filter(ImageFilter.GaussianBlur(1.6))
-        return scrim(bg, 0.34)
-
-    src = shot(platform, BACKDROP).convert("RGB")
+def backdrop(bg_path):
+    """The banner_bg.py fetch cropped to 720x320, blurred and scrimmed."""
+    src = Image.open(bg_path).convert("RGB")
     k = max(W / src.width, H / src.height)
-    up = src.resize((int(src.width * (int(k) + 1)), int(src.height * (int(k) + 1))), Image.NEAREST)
-    if up.width < W or up.height < H:
-        up = up.resize((max(W, up.width), max(H, up.height)), Image.NEAREST)
-    left = (up.width - W) // 2
-    top = int((up.height - H) * 0.35)
-    bg = up.crop((left, top, left + W, top + H)).convert("RGBA")
-
-    if style == "bleed":
-        bg = bg.filter(ImageFilter.GaussianBlur(7))
-    return scrim(bg, 0.42)
+    if k != 1.0:
+        src = src.resize((int(src.width * k + 0.5), int(src.height * k + 0.5)), Image.LANCZOS)
+    left, top = (src.width - W) // 2, (src.height - H) // 2
+    bg = src.crop((left, top, left + W, top + H)).convert("RGBA")
+    bg = bg.filter(ImageFilter.GaussianBlur(1.6))
+    return scrim(bg, 0.34)
 
 
 def scrim(bg, knock):
@@ -187,9 +166,9 @@ def tracked(d, xy, text, font, fill, track=0):
     return x
 
 
-def build(platform, style, bg_path=None):
+def build(platform, bg_path):
     cfg = PLATFORMS[platform]
-    img = backdrop(platform, style, bg_path)
+    img = backdrop(bg_path)
 
     w = watch(platform)
     img.alpha_composite(w, (cfg["cx"] - w.width // 2, cfg["cy"] - w.height // 2))
@@ -240,22 +219,20 @@ def build(platform, style, bg_path=None):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--style", default="photo", choices=["photo", "bleed", "crisp", "panel"])
     ap.add_argument("--bg", default=os.path.join(OUT, "bg_%s.png" % DEFAULT_BG),
-                    help="topo+radar backdrop from banner_bg.py (style=photo)")
+                    help="topo+radar backdrop from banner_bg.py")
     ap.add_argument("--platform", action="append", choices=list(PLATFORMS))
     ap.add_argument("--out", default=OUT)
-    ap.add_argument("--suffix", default="")
     a = ap.parse_args()
 
-    if a.style == "photo" and not os.path.exists(a.bg):
+    if not os.path.exists(a.bg):
         raise SystemExit("no backdrop at %s -- run banner_bg.py first" % a.bg)
 
     os.makedirs(a.out, exist_ok=True)
     for p in (a.platform or list(PLATFORMS)):
-        img = build(p, a.style, a.bg)
+        img = build(p, a.bg)
         assert img.size == (W, H), img.size
-        path = os.path.join(a.out, "%s_banner%s.png" % (p, a.suffix))
+        path = os.path.join(a.out, "%s_banner.png" % p)
         img.save(path)
         print("%s  %dx%d" % (path, img.width, img.height))
 

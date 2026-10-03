@@ -21,7 +21,7 @@ each platform fits and abbreviates its own text. 'WxPinned' is read only by
 the temporary fetchWeather() patch, which then sends the seeded weather and
 fetches nothing.
 
-Usage: seed.py <platform> <scenario-id> [scenarios.json]
+Usage: seed.py <platform> <scenario-id>
 """
 import dbm.dumb
 import json
@@ -41,10 +41,10 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # sdk/__init__.py get_sdk_persist_dir). A hardcoded version would, after an SDK
 # switch, wipe and seed a directory no emulator reads, still exit 0, and render
 # every tile at watch-side defaults against an un-wiped flash.
-# PEBBLE_EMULATOR_VERSION pins another version; pass the same value to
-# capture.sh, which forwards it as --sdk. Pinning also needs the .pbw rebuilt
-# under that SDK (`pebble sdk activate <ver>`), because older firmware refuses a
-# bundle stamped with a newer SDK minor.
+# PEBBLE_EMULATOR_VERSION pins another version, which emu.sh forwards to every
+# pebble command as --sdk. Pinning also needs the .pbw rebuilt under that SDK
+# (`pebble sdk activate <ver>`), because older firmware refuses a bundle
+# stamped with a newer SDK minor.
 _ROOT = os.path.expanduser("~/.local/share/pebble-sdk")
 _VER = os.environ.get("PEBBLE_EMULATOR_VERSION")
 if not _VER:
@@ -141,8 +141,7 @@ def weather_records(wx, now_ms):
 
 def main():
     platform, sid = sys.argv[1], int(sys.argv[2])
-    path = sys.argv[3] if len(sys.argv) > 3 else \
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "scenarios.json")
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scenarios.json")
     scen = next(s for s in json.load(open(path)) if s["id"] == sid)
     # Built before the wipe, so a bad field exits with the store untouched.
     wx = scen.get("weather")

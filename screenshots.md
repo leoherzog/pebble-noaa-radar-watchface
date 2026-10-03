@@ -5,28 +5,22 @@ How `screenshots/gallery/` is produced, and why each tile is what it is.
 Twelve scenarios × four platforms (emery, basalt, gabbro, chalk) = 48 tiles,
 plus one contact sheet per platform. Regenerating them is
 `screenshots/tools/capture.sh <platform> <id>`, but **three temporary source
-patches have to be applied first** — see [Reproducing](#reproducing).
+patches have to be applied first**; see [Reproducing](#reproducing).
 
-General emulator behaviour, such as `--vnc`, `pkill`, one shell invocation
-and localstorage seeding, lives in the workspace `CLAUDE.md`. The radar-source
-survey, the `emu-set-time` traps, which `emu-*` commands work on which
-platform, the scratch-copy lock trap and the decode ceilings appear in both
-files; change them together.
+General emulator traps live in the workspace `CLAUDE.md`. This file holds what
+is specific to the gallery.
 
 ## The radar imagery is archived, not live
 
 Live MRMS shows whatever weather exists at capture time, which makes a
-twelve-city gallery a matter of luck — most cities are clear most of the time.
+twelve-city gallery a matter of luck: most cities are clear most of the time.
 Each tile therefore pins a **specific historical 5-minute frame** from the Iowa
 Environmental Mesonet's archived NEXRAD `n0q` WMS, which covers 2011-02-16
 onward at `PT5M` (from its `GetCapabilities`).
 
-The timestamp travels in the URL, so **the system clock stays at the present**.
-That matters: `libfaketime` into the past breaks TLS, because a live
-certificate's `notBefore` can be more recent than the faked date, and the
-failure is silent (fetches just stop).
-
-Three things about the archive that are worth not rediscovering:
+The timestamp travels in the URL, so **the system clock stays at the present**,
+clear of the silent TLS failure CLAUDE.md records for a clock faked into the
+past.
 
 - **`TIME` needs full seconds.** `2026-08-10T21:00Z` returns a MapServer
   PostGIS error as a WMS XML exception under HTTP 200, which `fetchPng()` logs
@@ -39,24 +33,19 @@ Three things about the archive that are worth not rediscovering:
   map, so judge a code change against a same-day capture of the old build,
   never against the committed tiles.
 - **The colour ramp is not the shipped one.** IEM serves the classic NWS ramp,
-  which the shipped MRMS layer does not use, so these tiles do not show the
-  shipped colours. That is accepted for gallery imagery only; this source must
-  not ship. NOAA's own time-enabled service matches the shipped ramp but keeps
-  only four hours, too little for a gallery. CLAUDE.md's "Swapping the radar
-  source" paragraph, under Image pipeline, has the survey.
+  so the tiles do not show the shipped MRMS colours. That is accepted for
+  gallery imagery only; this source must not ship. NOAA's time-enabled service
+  has the shipped ramp but keeps only four hours, too little for a gallery.
+  CLAUDE.md's "Swapping the radar source" has the survey.
 
 Every frame goes through the shipped pipeline (the `fetchPng()` shrink, then
 `buildComposite()` with the round mask on gabbro and chalk) at all four display
 sizes, and fits each platform's decode limit in CLAUDE.md's Memory section with
-room to spare. The tightest fit is Seattle on chalk at **8,842 B, under two
-fifths of the largest composite chalk accepts**. `scenarios.json` records each
-frame's composite bytes, pre-fold colour count and share of that limit under
-`verify`. The limit moves with the build heap and the bytes with the basemap,
-so recompute a percentage from fresh bytes before quoting it.
-
-The emulator runs the same `composite.js`, so a capture log's `Composite <N> B,
-<C> colors -> <F>, hash <h>` line matches a node measurement of the same frame
-byte for byte, provided both fetched the basemap on the same day.
+room to spare. The tightest fit, Seattle on chalk at 8,842 B, is under two
+fifths of the largest composite chalk accepts. A capture log's `Composite <N> B`
+line gives a frame's current bytes, which move with the basemap. A node run of
+`composite.js` on the same frame matches it byte for byte when both fetched the
+basemap on the same day.
 
 ### How the frames were chosen
 
@@ -88,14 +77,12 @@ Fonts are XS/S/M/L/XL, a `*` meaning shrink to fit.
 | 11 | Washington DC | 2025-07-31 18:10 | State | opaque | Sat 23:48 | 24h | High-Low / Time / Wind / Pressure | XS, L, XS, XS | white / dark red | metric; battery 15% |
 | 12 | Honolulu HI | 2025-03-17 05:50 | City | translucent | Fri 14:26 | 12h | Lat/Long / Time / Weekday / — | XS, L, S | navy / white | non-CONUS, Lat/Long slot |
 
-Coverage of the variety axes: **zoom** City ×5, State ×4, Region ×3 · **radar
-mode** translucent ×6, opaque ×6 · **clock** 12h ×7, 24h ×5 · **line count** 1,
-2, 3 and 4 all present · **units** imperial ×10, metric ×2 · every fixed size
-except Super Large, plus three shrink-to-fit sizes · twelve distinct
-text/outline colour pairs · slot kinds Time, Date, Weekday, ISO Date, Battery,
-Bluetooth, Heart Rate, Steps, Distance, Radar Age, Lat/Long, Current
-Conditions, Today's Forecast, High/Low, Humidity, Wind, Pressure,
-Sunrise/Sunset, Active Alerts and Alerts-else-Conditions.
+Between them the tiles cover every zoom, translucent and opaque radar, both
+clock formats, both unit systems, one to four lines, and every fixed size
+except Super Large, plus shrink-to-fit. The slot kinds covered are Time, Date,
+Weekday, ISO Date, Battery, Bluetooth, Heart Rate, Steps, Distance, Radar Age,
+Lat/Long, Current Conditions, Today's Forecast, High/Low, Humidity, Wind,
+Pressure, Sunrise/Sunset, Active Alerts and Alerts-else-Conditions.
 
 **The weather strings are pinned, not live and not historical.**
 `api.weather.gov` has no usable archive: `/alerts` retains about a week and
@@ -122,42 +109,31 @@ frozen firmware and QEMU images, and most of what differs follows that line.
 | Battery reads in steps of | 1% | 10% | 1% | 10% |
 | Persisted composite (`Restored composite` in the log) | yes | no | yes | no |
 
-- **Injected health shows only from the face's next minute tick**, so a
-  screenshot taken seconds after `emu-steps` or `emu-heart-rate` still reads
-  `0` and `-- bpm`. Neither command moves Distance, and both exit 0 where they
-  do nothing, so tile 07 keeps the `format_slot()` stub below on every
+- **No platform's injection moves all three of tile 07's health slots**, so
+  tile 07 keeps the `format_slot()` stub ([patch 2](#reproducing)) on every
   platform.
-- **`emu-bt-connection --connected no` does drop the link**, and the watch
-  shows it 20–30 s later, badge included. On basalt and chalk the drop also
-  cuts pebble-tool's own channel, so `pebble screenshot` and every later
-  `emu-*` command time out. On chalk a VNC framebuffer grab still sees the
-  face, but in different colours from `pebble screenshot`, so it cannot stand
-  in for a tile. No tile shows the badge.
+- **On chalk a VNC framebuffer grab still sees the face after the Bluetooth
+  drop**, but in different colours from `pebble screenshot`, so it cannot stand
+  in for a tile. No tile shows the disconnected badge.
 - **Tile 02's 42% battery reads `40%` on basalt and chalk.**
-- **Without a persisted composite**, a relaunch's first frame comes from the
-  phone's `Replaying last composite`. `persist_get_max_size()` is a constant
-  4096 on basalt and chalk, which compiles the watch-side cache out. The
-  `Decoded composite` line is still the one to poll for.
-- **chalk's Quick View layout cannot be captured in the emulator.** Its
-  unobstructed area stays 180 px tall with or without a pin.
+- **basalt and chalk have no persisted composite**, so a relaunch's first frame
+  there comes from the phone's `Replaying last composite`. Poll for `Decoded
+  composite` on every platform.
 - **No tile sets an outer line above Small**, so chalk's outer-line cap never
   fires and every chalk tile uses the scenario's own sizes. On gabbro and chalk
   every line narrows to the chord of the circle at its height (CLAUDE.md, Text
   slot layout), so a round tile can shorten or ellipsize a string that fits on
   a rectangle.
-- **A chalk tile takes about a minute**, against about 40 s elsewhere, and its
-  boot fails more often. The first `pebble install` sometimes exits at once
-  with `[Errno 111] Connection refused`; `capture.sh` retries, and a retry that
-  half-boots waits out the full 420 s timeout before the tile fails. Re-run any
-  tile the sweep reports as failed.
+- **chalk's boot fails more often.** The first `pebble install` sometimes exits
+  at once with `[Errno 111] Connection refused`. `boot()` in `emu.sh` retries
+  once, and a retry that half-boots waits out the 420 s timeout before the tile
+  fails. Re-run any tile the sweep reports as failed.
 
 ## Watch clock
 
-Each tile sets its own clock via `pebble emu-set-time`, which moves only the
-watch. The general behaviour — why it beats libfaketime here, why it has to run
-*after* the final `pebble install`, and the 3 h `WX_MAX_AGE` ceiling on forward
-motion — is in CLAUDE.md under "Running the emulator from a non-graphical
-shell". What is specific to this gallery:
+Each tile sets its own clock with `pebble emu-set-time`. Its traps, including
+the clock race in `pebble screenshot`, are in CLAUDE.md under "Running the
+emulator from a non-graphical shell". What is specific to this gallery:
 
 - Ten tiles are set **backwards**, to spread times of day and weekdays across
   the sheet. Backwards is free except for a sun slot: the phone computes the
@@ -168,17 +144,11 @@ shell". What is specific to this gallery:
   any earlier and the watch runs more than 3 h ahead of the phone, so
   `WX_MAX_AGE` blanks its Humidity slot to `--`.
 - **Tile 04 is set forwards**, to `now + 7 min`, because it is the tile that
-  displays Radar Age — `watch_now - s_radar_time` — and a backwards clock clamps
+  displays Radar Age, `watch_now - s_radar_time`, and a backwards clock clamps
   that to `0 min`. Seven minutes reads as a plausible age and stays far inside
   the 3 h weather window. It is the one tile whose clock differs across
-  platforms, by the time between their captures, which `sweep.sh`'s
-  tile-major order keeps to about a minute per platform.
-- `pebble screenshot` sets the watch back to host time as it connects, before
-  it grabs the frame, so the capture races the face's repaint and a tile
-  occasionally comes out at wall-clock time. Read the tiles back and re-run any
-  that did.
-- Anything the app logs after the screenshot describes host time, not the
-  frame photographed.
+  platforms, by the time between their captures, which `sweep.sh`'s tile-major
+  order keeps small.
 
 ## Pinned weather
 
@@ -234,10 +204,9 @@ clears an alert once its own clock passes `ex`, so a tile clock set forwards
 must stay short of it.
 
 The phone fits each string to the display only when it assembles the payload,
-so one input can abbreviate differently per platform. basalt uses the 144 px
-table on every line and chalk on its inner lines, chalk's outer lines cap at
-Small, and gabbro's outer lines have their own table (`ROUND_PLATFORMS` in
-`index.js`). After a capture, `wx_payload` in the platform's pypkjs store at
+so one input can abbreviate differently per platform; CLAUDE.md's Weather
+slots section has the budget tables. After a capture, `wx_payload` in the
+platform's pypkjs store at
 `~/.local/share/pebble-sdk/<sdk-version>/<platform>/localstorage/<app-uuid>`
 holds the strings the phone sent.
 
@@ -250,7 +219,7 @@ platforms of that tile on the same side of it.
 Three temporary source patches are needed, and **all three are reverted in
 the committed tree** because none may ship.
 
-**1. `src/pkjs/index.js`** — route the radar layer to the archive. Add after
+**1. `src/pkjs/index.js`**: route the radar layer to the archive. Add after
 `exportUrl()`:
 
 ```js
@@ -269,12 +238,10 @@ function radarUrl(bbox) {
 and change the radar fetch in `locationSuccess()` from
 `fetchPng(exportUrl(RADAR_URL, bbox, true), …)` to `fetchPng(radarUrl(bbox), …)`.
 
-**2. `src/c/main.c`** — fake the health slots, needed only by tile 07.
-Injection moves Steps only on emery and gabbro, Heart Rate only on emery and
-Distance nowhere (see [Platform differences](#platform-differences)), so a
-four-platform sweep needs this stub. Revert it before running `emu-probe.sh`,
-which would otherwise report a false positive. Insert at the top of
-`format_slot()`, before its `switch`:
+**2. `src/c/main.c`**: fake the health slots, needed only by tile 07 (see
+[Platform differences](#platform-differences)). Revert it before running
+`emu-probe.sh`, which would otherwise report a false positive. Insert at the
+top of `format_slot()`, before its `switch`:
 
 ```c
   switch (kind) {
@@ -285,7 +252,7 @@ which would otherwise report a false positive. Insert at the top of
   }
 ```
 
-**3. `src/pkjs/index.js`** — send the seeded weather and fetch nothing. Add as
+**3. `src/pkjs/index.js`**: send the seeded weather and fetch nothing. Add as
 the first line of `fetchWeather()`:
 
 ```js
@@ -307,98 +274,85 @@ bash screenshots/tools/sweep.sh "emery basalt gabbro chalk" "10 1 2 3 4 5 6 7 8 
 next tile starts, so tile 04's clock differs least across platforms. Tile 10
 goes first because its clock resolves on the capture date: a late-evening
 sweep that reached it after midnight would set it more than 3 h ahead of the
-phone (see [Watch clock](#watch-clock)). About 45 s per tile on emery and
-gabbro, 50 s on basalt and up to a minute on chalk, so roughly 40 minutes for
-all 48, plus 7 minutes for each boot that half-fails and waits out its
-timeout. Revert the patches afterwards and `pebble clean && pebble build` to
-confirm the heap report is unchanged.
+phone (see [Watch clock](#watch-clock)). All 48 tiles take roughly 40 minutes,
+longer for each boot that half-fails. Revert the patches afterwards and
+`pebble clean && pebble build` to confirm the heap report is unchanged.
 
 The patches can instead go in a scratch copy of the project, leaving the
-committed tree untouched. Run the committed tools from inside the copy:
-`pebble install` takes the `.pbw` from the working directory, while tiles land
-in the tools' own tree unless `GALLERY_DIR` redirects them. Copy the project
-without `build/` and `.lock-waf_linux_build`: `pebble clean` in a copy that
-kept the lock deletes the original's `build/` and lock file.
+committed tree untouched; make the copy as CLAUDE.md's `.lock-waf_linux_build`
+bullet says. Run the committed tools from inside the copy: `pebble install`
+takes the `.pbw` from the working directory, while tiles land in the tools' own
+tree unless `GALLERY_DIR` redirects them.
 
-Then rebuild each contact sheet, and re-copy the store screenshots and banners
-if tiles 02, 11, 05, 03 or 10 changed:
+Then rebuild each contact sheet:
 
 ```sh
 uv run --with pillow python screenshots/tools/contact.py <platform>
 ```
 
+`screenshots/store/` holds copies of tiles 02, 11, 05, 03 and 10 for each
+platform, under the names in STORE.md's Screenshots table. If any of those
+tiles changed, re-copy it and re-run `banner.py`, which reads the store files.
+
 ### The tools
 
-- `screenshots/tools/scenarios.json` — the twelve tiles plus the two diff gates
-  below: location, radar timestamp, zoom, mode, units, battery, clock, the full
-  `cfg2` blob, each tile's per-platform composite under `verify`, and the
-  weather tiles' hand-written inputs under `weather`
-  ([Pinned weather](#pinned-weather)). A clock is
-  `YYYY-MM-DD HH:MM:SS`, `today HH:MM:SS` (the capture date) or `now+<N>m`.
-- `screenshots/tools/seed.py` — writes one scenario into a platform's pypkjs
-  `dbm.dumb` localStorage (`cfg2`, the phone-side keys, and the weather
-  records it builds from a `weather` field and stamps with the seed time),
-  after wiping `qemu_spi_flash.bin` and the whole localstorage directory. Both
-  the seeding format and why the wipe is mandatory rather than hygiene are in
-  CLAUDE.md. It does not write `TimelineAlerts`, so every tile runs at that
-  setting's *on* default. A tile without pinned weather makes one extra alerts
-  fetch, plus a `TL insertTimelinePin unavailable` log line when the point has
-  a severe alert; a pinned tile makes no NWS request at all. Neither is visible
-  in the capture. Seed the key to `'0'` if a scenario needs the off arm. The
-  flash wipe makes every capture a first run on the watch, logged as
-  `First run, text size <n>`, and the seeded `cfg2` then sets all four sizes,
-  so the emulator's Text Size never reaches a tile.
-- `screenshots/tools/capture.sh` — one tile end to end, printing its elapsed
-  seconds. `GALLERY_DIR` redirects the output; `PEBBLE_EMULATOR_VERSION` pins
-  the emulator's SDK and is forwarded to every emulator-touching command as
-  `--sdk`. The `.pbw` must be built by that SDK too. Logs go to
-  `/tmp/pebble-gallery-logs/`: `<platform>-<NN>-<slug>.log` from the app and
-  `.boot.log` from the booting install.
-- `screenshots/tools/sweep.sh` — drives `capture.sh` over a set of platforms
-  and scenarios, tile-major. It exists so the invoking command line is just
-  `bash sweep.sh …`: `capture.sh` runs `pkill -f 'qemu-pebbl[e]'`, and the
-  bracket trick only stops the pattern matching *its own* literal — a loop
-  typed at the prompt that mentions qemu would be killed by it.
-- `screenshots/tools/contact.py` — builds `gallery/contact-<platform>.png` from
-  that platform's twelve tiles: four across, 2× nearest-neighbour, each under
-  its number and name from `scenarios.json`. Tile size comes from the tiles, so
-  any display shape works.
-- `screenshots/tools/pixdiff.py` — pixel-diffs two gallery trees and reports
-  differing-pixel counts per tile, using PIL. Tiles are enumerated from the
-  first tree; one missing from the second is reported rather than skipped, but
-  one missing from the first is never compared.
-- `screenshots/tools/emu-probe.sh` — re-tests the firmware-dependent emu-*
-  commands after an SDK upgrade, with the health stub reverted and
-  non-colliding injection values. It screenshots after the next minute tick,
-  then drops the Bluetooth link last and reports whether a second screenshot
-  still gets through, since on some platforms the drop ends the session.
-- `screenshots/tools/banner.py` and `banner_bg.py` — the 720×320 appstore
-  marketing banners in `screenshots/banner/`, one per platform. No emulator
-  involved: the watch screen is a `screenshots/store/` PNG at native pixels,
-  the watch around it is the Pebble developer site's device frame, read from
-  `reference/sdk-docs`, and the backdrop is a plain topo+radar fetch at banner
-  size. Rationale and the build command are in `STORE.md` under Marketing
-  banner. `screenshots/store/` holds renamed copies of gallery tiles 02, 11,
-  05, 03 and 10 for each platform, 20 files; after re-capturing any of those,
-  re-copy it and re-run `banner.py`, which reads the store files.
-- `screenshots/tools/icon.py`: the 80×80 and 144×144 appstore icons in
-  `screenshots/icon/`. No emulator involved: one pinned topo and archived-radar
-  scene, fetched at eight times each icon's size, with the radar cut to flat
-  tiers and the centre marker drawn in the eye. Rationale and the build command
-  are in `STORE.md` under Icons.
+All of them live in `screenshots/tools/`.
+
+- `scenarios.json`: the twelve tiles plus the two diff gates below, each with
+  location, radar timestamp, zoom, mode, units, battery, clock, the full `cfg2`
+  blob and, for a weather tile, its hand-written `weather` inputs
+  ([Pinned weather](#pinned-weather)). A clock is `YYYY-MM-DD HH:MM:SS`,
+  `today HH:MM:SS` (the capture date) or `now+<N>m`.
+- `seed.py <platform> <scenario-id>`: wipes `qemu_spi_flash.bin` and the whole
+  localstorage directory, then writes the scenario into the platform's pypkjs
+  store: `cfg2`, the phone-side keys and the weather records. CLAUDE.md has the
+  seeding format and why the wipe is mandatory. It does not write
+  `TimelineAlerts`, so every tile runs with pins on: a tile without pinned
+  weather makes one extra alerts fetch, plus a `TL insertTimelinePin
+  unavailable` log line when the point has a severe alert, while a pinned tile
+  makes no NWS request at all. Neither shows in the capture; seed the key to
+  `'0'` if a scenario needs the off arm. The flash wipe makes every capture a
+  first run on the watch, logged as `First run, text size <n>`, and the seeded
+  `cfg2` then sets all four sizes, so the emulator's Text Size never reaches a
+  tile.
+- `emu.sh`: sourced by `capture.sh` and `emu-probe.sh`, never run. It holds
+  `cleanup`, `boot` with its single retry, `relaunch_logged`, and the `--sdk`
+  argument built from `PEBBLE_EMULATOR_VERSION` that both scripts pass to every
+  `pebble` command.
+- `capture.sh <platform> <id>`: one tile end to end, printing its elapsed
+  seconds and exiting non-zero on any failed step. `GALLERY_DIR`
+  redirects the output. `PEBBLE_EMULATOR_VERSION` pins the emulator's SDK, which
+  must also have built the `.pbw`. Logs go to
+  `${TMPDIR:-/tmp}/pebble-gallery-logs/<platform>-<NN>-<slug>.log`, with a
+  `.boot.log` beside it from the booting install.
+- `sweep.sh "<platforms>" "<ids>"`: runs `capture.sh` over them tile-major and
+  counts failures. Use it rather than a loop typed at the prompt; its header
+  says why.
+- `contact.py <platform> [gallery-dir]`: builds `gallery/contact-<platform>.png`
+  from that platform's twelve tiles.
+- `pixdiff.py <dir-a> <dir-b>`: counts differing pixels per tile, for the tiles
+  in `<dir-a>`.
+- `emu-probe.sh <platform> [scenario-id]`: re-tests the firmware-dependent
+  `emu-*` commands after an SDK upgrade, on scenario 07 by default, with the
+  health stub reverted. Its screenshots and logs go to
+  `${TMPDIR:-/tmp}/emu-probe-<platform>-<id>*`.
+- `banner_bg.py` and `banner.py`: the banner backdrop and the four store
+  banners in `screenshots/banner/`, built as STORE.md's Marketing banner says.
+- `icon.py`: the two store icons in `screenshots/icon/`, built as STORE.md's
+  Icons section says.
 
 **Two scenarios are diff gates rather than gallery tiles.** 13
 (`autofont-deterministic`) puts three of four slots on auto fonts with every
-string deterministic — Lat/Long, Time, Date, ISO date, no weather and no health
-— which is the only way to pixel-diff the shrink-to-fit path that CLAUDE.md
-says must never be judged by eye. 14 (`textwidth-stress`) puts **both outer
-bands** on Weekday at a fixed Extra Small font, where a round display's chord is
-narrowest — so any change in text metrics or in outer-band placement moves those
-glyphs and shows up as a diff. Neither gate uses Super Large, fixed or
-shrink-to-fit. Neither covers the first-run sizes either: every scenario seeds
-`cfg2`, which sets all four sizes, so a first-run change needs a capture from
-a store with no `cfg2` (CLAUDE.md, "Running the emulator from a non-graphical
-shell").
+string deterministic (Lat/Long, Time, Date, ISO date, no weather and no
+health), which is the only way to pixel-diff the shrink-to-fit path that
+CLAUDE.md says must never be judged by eye. 14 (`textwidth-stress`) puts
+**both outer bands** on Weekday at a fixed Extra Small font, where a round
+display's chord is narrowest, so any change in text metrics or in outer-band
+placement moves those glyphs and shows up as a diff. Neither gate uses Super
+Large, fixed or shrink-to-fit. Neither covers the first-run sizes either: every
+scenario seeds `cfg2`, which sets all four sizes, so a first-run change needs a
+capture from a store with no `cfg2` (CLAUDE.md, "Running the emulator from a
+non-graphical shell").
 
 Despite its slug, 14 does not cover width fitting. Weekday is `strftime("%A")`
 in `format_slot()`, formatted watch-side, so it never reaches
@@ -424,23 +378,13 @@ Expect 0 on every tile, provided both passes run on the same day and on the
 same side of New York's sunset: the basemap drifts over weeks, tile 10's clock
 resolves on the capture date, and its sun span rolls to the next day's pair at
 sunset. Tile 04 is left out because its `now+7m` clock moves with capture time.
-Tiles whose only diff is the clock digits are the screenshot's clock race (see
-[Watch clock](#watch-clock)), not a regression — confirm by checking that the
+A tile whose only diff is the clock digits shows the screenshot clock race (see
+[Watch clock](#watch-clock)), not a regression. Confirm it by checking that the
 phone-side `Composite … hash <h>` line matches across the two runs, which
 settles whether the *image* changed independently of the text.
 
 To compare two builds, run each from its own scratch copy (see
 [Reproducing](#reproducing)) with its own `GALLERY_DIR`. A baseline copy made
 with `git archive <commit>` needs the working tree's `screenshots/tools/`
-copied over it, since scenarios, pinned weather and clock forms change with
-the gallery.
-
-`capture.sh` is written to fail loudly rather than emit a wrong tile: it checks
-the exit status of `emu-time-format`, `emu-battery` and `emu-set-time` (each
-tries to launch a *second* emulator and exits 1 if the flags are missing), and
-it polls the log for `Decoded composite` with a 240 s deadline instead of
-sleeping a fixed interval. It then keeps the log attached until the phone's
-`Composite … hash` line lands too, since on a relaunch that line follows the
-replayed frame's decode. It also keeps the whole emulator sequence inside one
-shell invocation and drives `pkill` from a script file, for reasons given in
-CLAUDE.md; do not inline its commands into a compound shell command.
+copied over it, since the tools, scenarios, pinned weather and clock forms
+change with the gallery.

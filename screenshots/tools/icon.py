@@ -40,7 +40,8 @@ TIME = "2022-09-28T17:45:00Z"
 
 # Flat tiers by position on the archive's colour ramp (see ramp()), weakest
 # first. Anything below the first floor is left as map, which opens the gaps
-# between rainbands. Classic NWS colours, like the gallery's.
+# between rainbands. Classic NWS colours, like the gallery's, at floors picked
+# for the icon: not a legend, and not the shipped MRMS ramp.
 TIERS = (
     (2.55, (22, 150, 40)),
     (3.60, (255, 228, 20)),
